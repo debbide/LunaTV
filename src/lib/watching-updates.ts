@@ -45,6 +45,7 @@ export interface WatchingUpdate {
     newEpisodes?: number;
     remainingEpisodes?: number; // 新增：剩余集数
     latestEpisodes?: number;
+    remarks?: string; // 备注信息（如"已完结"）
   }[];
 }
 
@@ -68,30 +69,35 @@ const updateListeners = new Set<(hasUpdates: boolean) => void>();
 /**
  * 检查追番更新
  * 真实API调用检查用户的播放记录，检测是否有新集数更新
+ * @param forceRefresh 是否强制刷新，跳过缓存时间检查
  */
-export async function checkWatchingUpdates(): Promise<void> {
+export async function checkWatchingUpdates(forceRefresh = false): Promise<void> {
   try {
-    console.log('开始检查追番更新...');
+    console.log('开始检查追番更新...', forceRefresh ? '(强制刷新)' : '');
 
-    // 强制刷新播放记录缓存，确保获取最新的播放记录数据
-    console.log('强制刷新播放记录缓存以确保数据同步...');
-    forceRefreshPlayRecordsCache();
-
-    // 检查缓存是否有效
-    const lastCheckTime = STORAGE_TYPE !== 'localstorage'
-      ? memoryLastCheckTime
-      : parseInt(localStorage.getItem(LAST_CHECK_TIME_KEY) || '0');
+    // 🔧 修复：将 currentTime 提升到函数作用域
     const currentTime = Date.now();
 
-    if (currentTime - lastCheckTime < CACHE_DURATION) {
-      console.log('距离上次检查时间太短，使用缓存结果');
-      const cached = getCachedWatchingUpdates();
-      notifyListeners(cached);
-      return;
+    // 检查缓存是否有效（除非强制刷新）
+    if (!forceRefresh) {
+      const lastCheckTime = STORAGE_TYPE !== 'localstorage'
+        ? memoryLastCheckTime
+        : parseInt(localStorage.getItem(LAST_CHECK_TIME_KEY) || '0');
+
+      if (currentTime - lastCheckTime < CACHE_DURATION) {
+        console.log('距离上次检查时间太短，使用缓存结果');
+        const cached = getCachedWatchingUpdates();
+        notifyListeners(cached);
+        return;
+      }
     }
 
-    // 获取用户的播放记录
-    const recordsObj = await getAllPlayRecords();
+    // 🔧 优化：立即清除缓存并强制从服务器获取最新播放记录
+    console.log('🔄 强制从服务器获取最新播放记录以确保数据同步...');
+    forceRefreshPlayRecordsCache(true);
+
+    // 获取用户的播放记录（强制刷新）
+    const recordsObj = await getAllPlayRecords(true);
     const records = Object.entries(recordsObj).map(([key, record]) => ({
       ...record,
       id: key
@@ -152,7 +158,8 @@ export async function checkWatchingUpdates(): Promise<void> {
           hasContinueWatching: updateInfo.hasContinueWatching,
           newEpisodes: updateInfo.newEpisodes,
           remainingEpisodes: updateInfo.remainingEpisodes,
-          latestEpisodes: updateInfo.latestEpisodes
+          latestEpisodes: updateInfo.latestEpisodes,
+          remarks: record.remarks
         };
 
         updatedSeries.push(seriesInfo);
@@ -187,7 +194,8 @@ export async function checkWatchingUpdates(): Promise<void> {
           hasContinueWatching: false,
           newEpisodes: 0,
           remainingEpisodes: 0,
-          latestEpisodes: record.total_episodes
+          latestEpisodes: record.total_episodes,
+          remarks: record.remarks
         };
         updatedSeries.push(seriesInfo);
         return seriesInfo;
@@ -195,6 +203,24 @@ export async function checkWatchingUpdates(): Promise<void> {
     });
 
     await Promise.all(updatePromises);
+
+    // 🔧 修复：对 updatedSeries 进行排序，确保每次顺序一致，防止卡片闪烁
+    // 排序规则：
+    // 1. 有新剧集的排在前面
+    // 2. 需要继续观看的排在后面
+    // 3. 相同类型按标题字母顺序排序
+    updatedSeries.sort((a, b) => {
+      // 优先级1: 有新剧集的排在前面
+      if (a.hasNewEpisode !== b.hasNewEpisode) {
+        return a.hasNewEpisode ? -1 : 1;
+      }
+      // 优先级2: 需要继续观看的排在后面
+      if (a.hasContinueWatching !== b.hasContinueWatching) {
+        return a.hasContinueWatching ? -1 : 1;
+      }
+      // 优先级3: 按标题排序
+      return a.title.localeCompare(b.title, 'zh-CN');
+    });
 
     console.log(`检查完成: ${hasAnyUpdates ? `发现${updatedCount}部剧集有新集数更新，${continueWatchingCount}部剧集需要继续观看` : '暂无更新'}`);
 
@@ -310,24 +336,20 @@ async function checkSingleRecordUpdate(record: PlayRecord, videoId: string, stor
     if (hasUpdate) {
       console.log(`${record.title} 发现新集数: ${originalTotalEpisodes} -> ${latestEpisodes} 集，新增${newEpisodes}集`);
 
-      // 如果检测到新集数，同时更新播放记录的total_episodes
-      if (latestEpisodes > record.total_episodes) {
-        console.log(`🔄 更新播放记录集数: ${record.title} ${record.total_episodes} -> ${latestEpisodes}`);
-        try {
-          // 🔒 关键修复：更新前必须确保 original_episodes 已正确设置
-          // 使用我们已经获取到的 originalTotalEpisodes（来自 getOriginalEpisodes）
-          const updatedRecord: PlayRecord = {
-            ...record,
-            total_episodes: latestEpisodes,
-            // ✅ 使用已经通过 getOriginalEpisodes 获取/修复的原始集数
-            original_episodes: originalTotalEpisodes
-          };
+      // 🔑 关键修复：watching-updates 不应该调用 savePlayRecord 更新播放记录
+      // 因为 savePlayRecord 会触发 checkShouldUpdateOriginalEpisodes，导致 original_episodes 被错误更新
+      //
+      // 正确的更新流程应该是：
+      // 1. watching-updates 只负责检测和显示新集数提醒
+      // 2. 用户下次实际观看时，播放器会自动获取最新的 total_episodes
+      // 3. 只有用户真正观看新集数时，original_episodes 才会被更新
+      //
+      // 因此，这里移除了 savePlayRecord 调用，避免误更新 original_episodes
 
-          await savePlayRecord(storageSourceName || record.source_name, videoId, updatedRecord);
-          console.log(`✅ 播放记录集数更新成功: ${record.title}，original_episodes 保持为 ${updatedRecord.original_episodes}`);
-        } catch (error) {
-          console.error(`❌ 更新播放记录集数失败: ${record.title}`, error);
-        }
+      if (latestEpisodes > record.total_episodes) {
+        console.log(`📊 检测到集数差异: ${record.title} 播放记录${record.total_episodes}集 < API最新${latestEpisodes}集`);
+        console.log(`✅ 已记录新集数信息，等待用户实际观看时自动同步`);
+        // 注意：不调用 savePlayRecord，避免触发 original_episodes 的错误更新
       }
     }
 
@@ -398,65 +420,11 @@ async function getOriginalEpisodes(record: PlayRecord, videoId: string, recordKe
     return record.original_episodes;
   }
 
-  // 🔧 关键修复：对于旧数据（original_episodes = null），立即同步修复
-  // 🚨 重要：record.total_episodes 可能已经被 checkSingleRecordUpdate 的第 294-310 行更新过
-  // 解决方案：不使用内存中的 record.total_episodes，而是从数据库重新读取原始值
+  // 🔑 如果数据库中也没有 original_episodes，使用当前 total_episodes
+  // 但不要写回数据库！只返回值，让首次保存时自然设置
   if ((record.original_episodes === undefined || record.original_episodes === null) && record.total_episodes > 0) {
-    console.log(`🔧 检测到历史记录缺少原始集数，需要从数据库读取原始值: ${record.title}`);
-
-    // 🔒 防重复修复：检查是否已经在修复中
-    if (!fixingRecords.has(recordKey)) {
-      fixingRecords.add(recordKey);
-
-      try {
-        // 🔑 关键：从数据库重新读取播放记录，获取未被更新的 total_episodes
-        const freshRecordsResponse = await fetch('/api/playrecords');
-        if (!freshRecordsResponse.ok) {
-          throw new Error('无法从数据库读取播放记录');
-        }
-        const freshRecords = await freshRecordsResponse.json();
-        const freshRecord = freshRecords[recordKey];
-
-        if (!freshRecord) {
-          console.warn(`⚠️ 数据库中未找到记录: ${record.title}，使用当前值`);
-          fixingRecords.delete(recordKey);
-          return record.total_episodes;
-        }
-
-        // 使用数据库中的 total_episodes 作为原始集数
-        const originalEpisodesToFix = freshRecord.total_episodes;
-        console.log(`📚 从数据库读取到原始集数: ${record.title} = ${originalEpisodesToFix}集 (内存中已更新为 ${record.total_episodes}集)`);
-
-        // 立即保存原始集数到数据库
-        await fetch('/api/playrecords', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            key: recordKey,
-            record: {
-              ...freshRecord,  // 使用数据库中的完整记录
-              original_episodes: originalEpisodesToFix,  // 设置原始集数
-              save_time: freshRecord.save_time // 保持原有的save_time
-            }
-          })
-        });
-        console.log(`✅ 已同步修复 ${record.title} 的原始集数: ${originalEpisodesToFix}集`);
-
-        // 修复完成后移除标记
-        fixingRecords.delete(recordKey);
-
-        // 返回修复后的值
-        return originalEpisodesToFix;
-      } catch (error) {
-        console.error(`❌ 修复 ${record.title} 原始集数失败:`, error);
-        fixingRecords.delete(recordKey);
-        // 失败时仍然返回当前值，但下次会重试
-        return record.total_episodes;
-      }
-    } else {
-      console.log(`⏳ ${record.title} 原始集数修复正在进行中，使用当前值`);
-      return record.total_episodes;
-    }
+    console.log(`⚠️ ${record.title} 缺少原始集数，使用当前值 ${record.total_episodes}集（不写入数据库）`);
+    return record.total_episodes;
   }
 
   // 如果没有原始集数记录，尝试从localStorage读取（向后兼容）
@@ -723,6 +691,30 @@ export function clearWatchingUpdates(): void {
     }
   } catch (error) {
     console.error('清除新集数更新状态失败:', error);
+  }
+}
+
+/**
+ * 强制清除watching updates缓存（包括内存和localStorage）
+ * 用于播放记录更新后立即清除缓存
+ */
+export function forceClearWatchingUpdatesCache(): void {
+  try {
+    console.log('🔄 强制清除 watching-updates 缓存');
+
+    // 清除内存缓存
+    memoryWatchingUpdatesCache = null;
+    memoryLastCheckTime = 0;
+
+    // 清除 localStorage 缓存（如果存在）
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(WATCHING_UPDATES_CACHE_KEY);
+      localStorage.removeItem(LAST_CHECK_TIME_KEY);
+    }
+
+    console.log('✅ watching-updates 缓存已清除');
+  } catch (error) {
+    console.error('清除 watching-updates 缓存失败:', error);
   }
 }
 

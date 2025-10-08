@@ -15,11 +15,12 @@
  */
 
 import { getAuthInfoFromBrowserCookie } from './auth';
-import { SkipConfig, UserPlayStat } from './types';
+import { UserPlayStat, SkipSegment, EpisodeSkipConfig } from './types';
 import type { PlayRecord } from './types';
+import { forceClearWatchingUpdatesCache } from './watching-updates';
 
 // 重新导出类型以保持API兼容性
-export type { PlayRecord } from './types';
+export type { PlayRecord, SkipSegment, EpisodeSkipConfig } from './types';
 
 // 全局错误触发函数
 function triggerGlobalError(message: string) {
@@ -58,7 +59,7 @@ interface UserCacheStore {
   playRecords?: CacheData<Record<string, PlayRecord>>;
   favorites?: CacheData<Record<string, Favorite>>;
   searchHistory?: CacheData<string[]>;
-  skipConfigs?: CacheData<Record<string, SkipConfig>>;
+  skipConfigs?: CacheData<Record<string, EpisodeSkipConfig>>;
   userStats?: CacheData<UserStats>; // 添加用户统计数据缓存
   // 注意：豆瓣缓存已迁移到统一存储，不再需要这里的缓存结构
 }
@@ -86,6 +87,7 @@ const STORAGE_TYPE = (() => {
       | 'localstorage'
       | 'redis'
       | 'upstash'
+      | 'kvrocks'
       | undefined) ||
     'localstorage';
   return raw;
@@ -332,7 +334,7 @@ class HybridCacheManager {
   /**
    * 获取缓存的跳过片头片尾配置
    */
-  getCachedSkipConfigs(): Record<string, SkipConfig> | null {
+  getCachedSkipConfigs(): Record<string, EpisodeSkipConfig> | null {
     const username = this.getCurrentUsername();
     if (!username) return null;
 
@@ -349,7 +351,7 @@ class HybridCacheManager {
   /**
    * 缓存跳过片头片尾配置
    */
-  cacheSkipConfigs(data: Record<string, SkipConfig>): void {
+  cacheSkipConfigs(data: Record<string, EpisodeSkipConfig>): void {
     const username = this.getCurrentUsername();
     if (!username) return;
 
@@ -405,15 +407,23 @@ class HybridCacheManager {
   /**
    * 强制刷新播放记录缓存
    * 用于新集数检测时确保数据同步
+   * @param immediate 是否立即清除缓存（而不是仅标记过期）
    */
-  forceRefreshPlayRecordsCache(): void {
+  forceRefreshPlayRecordsCache(immediate = false): void {
     const username = this.getCurrentUsername();
     if (!username) return;
 
     const userCache = this.getUserCache(username);
     if (userCache.playRecords) {
-      // 将播放记录缓存时间戳设置为过期
-      userCache.playRecords.timestamp = 0;
+      if (immediate) {
+        // 🔧 优化：立即清除缓存，而不是仅标记过期
+        delete userCache.playRecords;
+        console.log('✅ 立即清除播放记录缓存');
+      } else {
+        // 将播放记录缓存时间戳设置为过期
+        userCache.playRecords.timestamp = 0;
+        console.log('✅ 标记播放记录缓存为过期');
+      }
       this.saveUserCache(username, userCache);
     }
   }
@@ -703,8 +713,9 @@ async function checkShouldUpdateOriginalEpisodes(existingRecord: PlayRecord, new
  * 读取全部播放记录。
  * 非本地存储模式下使用混合缓存策略：优先返回缓存数据，后台异步同步最新数据。
  * 在服务端渲染阶段 (window === undefined) 时返回空对象，避免报错。
+ * @param forceRefresh 是否强制从服务器获取最新数据（跳过缓存）
  */
-export async function getAllPlayRecords(): Promise<Record<string, PlayRecord>> {
+export async function getAllPlayRecords(forceRefresh = false): Promise<Record<string, PlayRecord>> {
   // 服务器端渲染阶段直接返回空，交由客户端 useEffect 再行请求
   if (typeof window === 'undefined') {
     return {};
@@ -712,6 +723,30 @@ export async function getAllPlayRecords(): Promise<Record<string, PlayRecord>> {
 
   // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
   if (STORAGE_TYPE !== 'localstorage') {
+    // 🔧 优化：如果强制刷新，跳过缓存直接获取最新数据
+    if (forceRefresh) {
+      try {
+        console.log('🔄 强制刷新播放记录，跳过缓存直接从API获取');
+        const freshData = await fetchFromApi<Record<string, PlayRecord>>(
+          `/api/playrecords`
+        );
+        cacheManager.cachePlayRecords(freshData);
+        // 触发数据更新事件
+        window.dispatchEvent(
+          new CustomEvent('playRecordsUpdated', {
+            detail: freshData,
+          })
+        );
+        return freshData;
+      } catch (err) {
+        console.error('强制刷新播放记录失败:', err);
+        triggerGlobalError('获取播放记录失败');
+        // 失败时尝试返回缓存数据作为降级
+        const cachedData = cacheManager.getCachedPlayRecords();
+        return cachedData || {};
+      }
+    }
+
     // 优先从缓存获取数据
     const cachedData = cacheManager.getCachedPlayRecords();
 
@@ -806,7 +841,7 @@ export async function savePlayRecord(
     }
   }
 
-  // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
+  // 数据库存储模式：乐观更新策略（包括 redis、upstash 和 kvrocks）
   if (STORAGE_TYPE !== 'localstorage') {
     // 立即更新缓存
     const cachedRecords = cacheManager.getCachedPlayRecords() || {};
@@ -833,17 +868,43 @@ export async function savePlayRecord(
       // 🔑 关键修复：数据库更新成功后，如果更新了 original_episodes，清除相关缓存
       if ((record as any)._shouldClearCache) {
         try {
-          // 清除 watching-updates 缓存
-          localStorage.removeItem('moontv_watching_updates');
-          localStorage.removeItem('moontv_last_update_check');
+          // 🔧 优化：使用新函数清除 watching-updates 缓存
+          forceClearWatchingUpdatesCache();
 
-          // 🔑 关键：强制刷新播放记录缓存，确保下次检查使用最新数据
-          cacheManager.forceRefreshPlayRecordsCache();
+          // 🔑 关键：立即清除播放记录缓存，确保下次检查使用最新数据
+          cacheManager.forceRefreshPlayRecordsCache(true);
 
-          console.log('✅ 数据库更新成功，已清除 watching-updates 和播放记录缓存');
+          // 🔧 优化：立即获取最新数据并更新缓存，触发更新事件
+          const freshData = await fetchFromApi<Record<string, PlayRecord>>(`/api/playrecords`);
+          cacheManager.cachePlayRecords(freshData);
+          window.dispatchEvent(
+            new CustomEvent('playRecordsUpdated', {
+              detail: freshData,
+            })
+          );
+
+          console.log('✅ 数据库更新成功，已清除 watching-updates 和播放记录缓存，并刷新最新数据');
           delete (record as any)._shouldClearCache;
         } catch (cacheError) {
           console.warn('清除缓存失败:', cacheError);
+        }
+      } else {
+        // 🔧 优化：即使没有 _shouldClearCache 标志，也要从服务器同步最新数据以确保缓存一致性
+        // 特别是对于 kvrocks 等需要实时同步的场景
+        try {
+          const freshData = await fetchFromApi<Record<string, PlayRecord>>(`/api/playrecords`);
+          // 只有数据真正不同时才更新缓存
+          if (JSON.stringify(cachedRecords) !== JSON.stringify(freshData)) {
+            cacheManager.cachePlayRecords(freshData);
+            window.dispatchEvent(
+              new CustomEvent('playRecordsUpdated', {
+                detail: freshData,
+              })
+            );
+            console.log('✅ 播放记录已同步最新数据');
+          }
+        } catch (syncError) {
+          console.warn('同步最新播放记录失败:', syncError);
         }
       }
 
@@ -1508,9 +1569,21 @@ export function clearUserCache(): void {
 /**
  * 强制刷新播放记录缓存
  * 用于新集数检测时确保数据同步
+ * @param immediate 是否立即清除缓存（而不是仅标记过期）
  */
-export function forceRefreshPlayRecordsCache(): void {
-  cacheManager.forceRefreshPlayRecordsCache();
+export function forceRefreshPlayRecordsCache(immediate = false): void {
+  cacheManager.forceRefreshPlayRecordsCache(immediate);
+}
+
+/**
+ * 强制从服务器获取最新播放记录（同步方法）
+ * 用于需要立即获取最新数据的场景
+ */
+export async function forceGetFreshPlayRecords(): Promise<Record<string, PlayRecord>> {
+  // 立即清除缓存
+  forceRefreshPlayRecordsCache(true);
+  // 强制从服务器获取
+  return getAllPlayRecords(true);
 }
 
 /**
@@ -1527,7 +1600,7 @@ export async function refreshAllCache(): Promise<void> {
         fetchFromApi<Record<string, PlayRecord>>(`/api/playrecords`),
         fetchFromApi<Record<string, Favorite>>(`/api/favorites`),
         fetchFromApi<string[]>(`/api/searchhistory`),
-        fetchFromApi<Record<string, SkipConfig>>(`/api/skipconfigs`),
+        fetchFromApi<Record<string, EpisodeSkipConfig>>(`/api/skipconfigs`),
       ]);
 
     if (playRecords.status === 'fulfilled') {
@@ -1678,64 +1751,65 @@ export async function preloadUserData(): Promise<void> {
 export async function getSkipConfig(
   source: string,
   id: string
-): Promise<SkipConfig | null> {
-  // 服务器端渲染阶段直接返回空
-  if (typeof window === 'undefined') {
-    return null;
-  }
+): Promise<EpisodeSkipConfig | null> {
+  try {
+    // 服务器端渲染阶段直接返回空
+    if (typeof window === 'undefined') {
+      return null;
+    }
 
-  const key = generateStorageKey(source, id);
+    const key = generateStorageKey(source, id);
 
-  // 数据库存储模式：使用混合缓存策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
-    // 优先从缓存获取数据
-    const cachedData = cacheManager.getCachedSkipConfigs();
-
-    if (cachedData) {
-      // 返回缓存数据，同时后台异步更新
-      fetchFromApi<Record<string, SkipConfig>>(`/api/skipconfigs`)
-        .then((freshData) => {
-          // 只有数据真正不同时才更新缓存
-          if (JSON.stringify(cachedData) !== JSON.stringify(freshData)) {
-            cacheManager.cacheSkipConfigs(freshData);
-            // 触发数据更新事件
-            window.dispatchEvent(
-              new CustomEvent('skipConfigsUpdated', {
-                detail: freshData,
-              })
-            );
-          }
-        })
-        .catch((err) => {
-          console.warn('后台同步跳过片头片尾配置失败:', err);
-        });
-
-      return cachedData[key] || null;
+    if (STORAGE_TYPE === 'localstorage') {
+      // localStorage 模式
+      const raw = localStorage.getItem('moontv_skip_configs');
+      if (!raw) return null;
+      const allConfigs = JSON.parse(raw) as Record<string, EpisodeSkipConfig>;
+      return allConfigs[key] || null;
     } else {
-      // 缓存为空，直接从 API 获取并缓存
-      try {
-        const freshData = await fetchFromApi<Record<string, SkipConfig>>(
-          `/api/skipconfigs`
-        );
-        cacheManager.cacheSkipConfigs(freshData);
-        return freshData[key] || null;
-      } catch (err) {
-        console.error('获取跳过片头片尾配置失败:', err);
-        triggerGlobalError('获取跳过片头片尾配置失败');
+      // 数据库模式：先查缓存
+      const cachedConfigs = cacheManager.getCachedSkipConfigs();
+
+      if (cachedConfigs && cachedConfigs[key]) {
+        return cachedConfigs[key];
+      }
+
+      // 缓存未命中，从服务器获取
+      const authInfo = getAuthInfoFromBrowserCookie();
+      if (!authInfo?.username) {
         return null;
       }
-    }
-  }
 
-  // localStorage 模式
-  try {
-    const raw = localStorage.getItem('moontv_skip_configs');
-    if (!raw) return null;
-    const configs = JSON.parse(raw) as Record<string, SkipConfig>;
-    return configs[key] || null;
+      const response = await fetch('/api/skipconfigs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'get',
+          key,
+          username: authInfo.username,
+        }),
+      });
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const data = await response.json();
+      const config = data.config;
+
+      // 更新缓存
+      if (config) {
+        const allConfigs = cachedConfigs || {};
+        allConfigs[key] = config;
+        cacheManager.cacheSkipConfigs(allConfigs);
+      }
+
+      return config;
+    }
   } catch (err) {
-    console.error('读取跳过片头片尾配置失败:', err);
-    triggerGlobalError('读取跳过片头片尾配置失败');
+    console.error('获取跳过配置失败:', err);
     return null;
   }
 }
@@ -1747,59 +1821,64 @@ export async function getSkipConfig(
 export async function saveSkipConfig(
   source: string,
   id: string,
-  config: SkipConfig
+  config: EpisodeSkipConfig
 ): Promise<void> {
-  const key = generateStorageKey(source, id);
+  try {
+    const key = generateStorageKey(source, id);
 
-  // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
-    // 立即更新缓存
-    const cachedConfigs = cacheManager.getCachedSkipConfigs() || {};
-    cachedConfigs[key] = config;
-    cacheManager.cacheSkipConfigs(cachedConfigs);
+    if (STORAGE_TYPE === 'localstorage') {
+      // localStorage 模式
+      if (typeof window === 'undefined') {
+        console.warn('无法在服务端保存跳过配置到 localStorage');
+        return;
+      }
+      const raw = localStorage.getItem('moontv_skip_configs');
+      const configs = raw ? (JSON.parse(raw) as Record<string, EpisodeSkipConfig>) : {};
+      configs[key] = config;
+      localStorage.setItem('moontv_skip_configs', JSON.stringify(configs));
+      window.dispatchEvent(
+        new CustomEvent('skipConfigsUpdated', {
+          detail: configs,
+        })
+      );
+    } else {
+      // 数据库模式：乐观更新策略
+      const cachedConfigs = cacheManager.getCachedSkipConfigs() || {};
+      cachedConfigs[key] = config;
+      cacheManager.cacheSkipConfigs(cachedConfigs);
 
-    // 触发立即更新事件
-    window.dispatchEvent(
-      new CustomEvent('skipConfigsUpdated', {
-        detail: cachedConfigs,
-      })
-    );
+      window.dispatchEvent(
+        new CustomEvent('skipConfigsUpdated', {
+          detail: cachedConfigs,
+        })
+      );
 
-    // 异步同步到数据库
-    try {
-      await fetchWithAuth('/api/skipconfigs', {
+      // 异步同步到数据库
+      const authInfo = getAuthInfoFromBrowserCookie();
+      if (!authInfo?.username) {
+        throw new Error('未登录');
+      }
+
+      const response = await fetch('/api/skipconfigs', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ key, config }),
+        body: JSON.stringify({
+          action: 'set',
+          key,
+          config,
+          username: authInfo.username,
+        }),
       });
-    } catch (err) {
-      console.error('保存跳过片头片尾配置失败:', err);
-      triggerGlobalError('保存跳过片头片尾配置失败');
+
+      if (!response.ok) {
+        throw new Error('保存跳过配置失败');
+      }
     }
-    return;
-  }
-
-  // localStorage 模式
-  if (typeof window === 'undefined') {
-    console.warn('无法在服务端保存跳过片头片尾配置到 localStorage');
-    return;
-  }
-
-  try {
-    const raw = localStorage.getItem('moontv_skip_configs');
-    const configs = raw ? (JSON.parse(raw) as Record<string, SkipConfig>) : {};
-    configs[key] = config;
-    localStorage.setItem('moontv_skip_configs', JSON.stringify(configs));
-    window.dispatchEvent(
-      new CustomEvent('skipConfigsUpdated', {
-        detail: configs,
-      })
-    );
   } catch (err) {
-    console.error('保存跳过片头片尾配置失败:', err);
-    triggerGlobalError('保存跳过片头片尾配置失败');
+    console.error('保存跳过配置失败:', err);
+    triggerGlobalError('保存跳过配置失败');
     throw err;
   }
 }
@@ -1808,7 +1887,7 @@ export async function saveSkipConfig(
  * 获取所有跳过片头片尾配置。
  * 数据库存储模式下使用混合缓存策略：优先返回缓存数据，后台异步同步最新数据。
  */
-export async function getAllSkipConfigs(): Promise<Record<string, SkipConfig>> {
+export async function getAllSkipConfigs(): Promise<Record<string, EpisodeSkipConfig>> {
   // 服务器端渲染阶段直接返回空
   if (typeof window === 'undefined') {
     return {};
@@ -1821,7 +1900,7 @@ export async function getAllSkipConfigs(): Promise<Record<string, SkipConfig>> {
 
     if (cachedData) {
       // 返回缓存数据，同时后台异步更新
-      fetchFromApi<Record<string, SkipConfig>>(`/api/skipconfigs`)
+      fetchFromApi<Record<string, EpisodeSkipConfig>>(`/api/skipconfigs`)
         .then((freshData) => {
           // 只有数据真正不同时才更新缓存
           if (JSON.stringify(cachedData) !== JSON.stringify(freshData)) {
@@ -1843,7 +1922,7 @@ export async function getAllSkipConfigs(): Promise<Record<string, SkipConfig>> {
     } else {
       // 缓存为空，直接从 API 获取并缓存
       try {
-        const freshData = await fetchFromApi<Record<string, SkipConfig>>(
+        const freshData = await fetchFromApi<Record<string, EpisodeSkipConfig>>(
           `/api/skipconfigs`
         );
         cacheManager.cacheSkipConfigs(freshData);
@@ -1860,7 +1939,7 @@ export async function getAllSkipConfigs(): Promise<Record<string, SkipConfig>> {
   try {
     const raw = localStorage.getItem('moontv_skip_configs');
     if (!raw) return {};
-    return JSON.parse(raw) as Record<string, SkipConfig>;
+    return JSON.parse(raw) as Record<string, EpisodeSkipConfig>;
   } catch (err) {
     console.error('读取跳过片头片尾配置失败:', err);
     triggerGlobalError('读取跳过片头片尾配置失败');
@@ -1876,51 +1955,59 @@ export async function deleteSkipConfig(
   source: string,
   id: string
 ): Promise<void> {
-  const key = generateStorageKey(source, id);
-
-  // 数据库存储模式：乐观更新策略（包括 redis 和 upstash）
-  if (STORAGE_TYPE !== 'localstorage') {
-    // 立即更新缓存
-    const cachedConfigs = cacheManager.getCachedSkipConfigs() || {};
-    delete cachedConfigs[key];
-    cacheManager.cacheSkipConfigs(cachedConfigs);
-
-    // 触发立即更新事件
-    window.dispatchEvent(
-      new CustomEvent('skipConfigsUpdated', {
-        detail: cachedConfigs,
-      })
-    );
-
-    // 异步同步到数据库
-    try {
-      await fetchWithAuth(`/api/skipconfigs?key=${encodeURIComponent(key)}`, {
-        method: 'DELETE',
-      });
-    } catch (err) {
-      console.error('删除跳过片头片尾配置失败:', err);
-      triggerGlobalError('删除跳过片头片尾配置失败');
-    }
-    return;
-  }
-
-  // localStorage 模式
-  if (typeof window === 'undefined') {
-    console.warn('无法在服务端删除跳过片头片尾配置到 localStorage');
-    return;
-  }
-
   try {
-    const raw = localStorage.getItem('moontv_skip_configs');
-    if (raw) {
-      const configs = JSON.parse(raw) as Record<string, SkipConfig>;
-      delete configs[key];
-      localStorage.setItem('moontv_skip_configs', JSON.stringify(configs));
+    const key = generateStorageKey(source, id);
+
+    if (STORAGE_TYPE === 'localstorage') {
+      // localStorage 模式
+      if (typeof window === 'undefined') {
+        console.warn('无法在服务端删除跳过配置');
+        return;
+      }
+      const raw = localStorage.getItem('moontv_skip_configs');
+      if (raw) {
+        const configs = JSON.parse(raw) as Record<string, EpisodeSkipConfig>;
+        delete configs[key];
+        localStorage.setItem('moontv_skip_configs', JSON.stringify(configs));
+        window.dispatchEvent(
+          new CustomEvent('skipConfigsUpdated', {
+            detail: configs,
+          })
+        );
+      }
+    } else {
+      // 数据库模式：乐观更新策略
+      const cachedConfigs = cacheManager.getCachedSkipConfigs() || {};
+      delete cachedConfigs[key];
+      cacheManager.cacheSkipConfigs(cachedConfigs);
+
       window.dispatchEvent(
         new CustomEvent('skipConfigsUpdated', {
-          detail: configs,
+          detail: cachedConfigs,
         })
       );
+
+      // 异步同步到数据库
+      const authInfo = getAuthInfoFromBrowserCookie();
+      if (!authInfo?.username) {
+        throw new Error('未登录');
+      }
+
+      const response = await fetch('/api/skipconfigs', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'delete',
+          key,
+          username: authInfo.username,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('删除跳过配置失败');
+      }
     }
   } catch (err) {
     console.error('删除跳过片头片尾配置失败:', err);
@@ -2351,3 +2438,5 @@ export async function clearUserStats(): Promise<void> {
     throw error;
   }
 }
+
+// ============================================================================
