@@ -46,6 +46,8 @@ export interface Favorite {
   save_time: number;
   search_title?: string;
   origin?: 'vod' | 'live';
+  releaseDate?: string; // 上映日期 (YYYY-MM-DD)，用于即将上映内容
+  remarks?: string; // 备注信息（如"X天后上映"、"已上映"等）
 }
 
 // ---- 缓存数据结构 ----
@@ -587,13 +589,47 @@ if (typeof window !== 'undefined') {
 
 // ---- 工具函数 ----
 /**
+ * 创建带超时的 fetch 请求
+ */
+function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeout = 15000 // 默认15秒超时
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`请求超时: ${url} (${timeout}ms)`));
+    }, timeout);
+
+    fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+      .then((response) => {
+        clearTimeout(timeoutId);
+        resolve(response);
+      })
+      .catch((error) => {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+          reject(new Error(`请求超时: ${url} (${timeout}ms)`));
+        } else {
+          reject(error);
+        }
+      });
+  });
+}
+
+/**
  * 通用的 fetch 函数，处理 401 状态码自动跳转登录
  */
 async function fetchWithAuth(
   url: string,
   options?: RequestInit
 ): Promise<Response> {
-  const res = await fetch(url, options);
+  const res = await fetchWithTimeout(url, options);
   if (!res.ok) {
     // 如果是 401 未授权，跳转到登录页面
     if (res.status === 401) {
@@ -617,9 +653,32 @@ async function fetchWithAuth(
   return res;
 }
 
-async function fetchFromApi<T>(path: string): Promise<T> {
-  const res = await fetchWithAuth(path);
-  return (await res.json()) as T;
+/**
+ * 带重试的 API 请求函数
+ */
+async function fetchFromApi<T>(path: string, retries = 2): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetchWithAuth(path);
+      return (await res.json()) as T;
+    } catch (error) {
+      lastError = error as Error;
+      console.warn(`请求失败 (尝试 ${i + 1}/${retries + 1}):`, error);
+
+      // 如果不是最后一次尝试，等待后重试
+      if (i < retries) {
+        // 使用指数退避：第一次重试等待500ms，第二次等待1000ms
+        const delay = 500 * Math.pow(2, i);
+        console.log(`等待 ${delay}ms 后重试...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  // 所有重试都失败，抛出最后一个错误
+  throw lastError || new Error('请求失败');
 }
 
 /**
@@ -650,36 +709,39 @@ export function generateStorageKey(source: string, id: string): string {
  * - 用户看第7集 → original_episodes 更新为 8（用户已消费这次更新）
  * - 下次更新到第10集 → 提醒"2集新增"（10-8），而不是"4集新增"（10-6）
  */
-async function checkShouldUpdateOriginalEpisodes(existingRecord: PlayRecord, newRecord: PlayRecord, recordKey: string): Promise<{ shouldUpdate: boolean; latestTotalEpisodes: number }> {
-  // 🔑 关键修复：从数据库读取最新的 original_episodes，不信任缓存中的值
+async function checkShouldUpdateOriginalEpisodes(existingRecord: PlayRecord, newRecord: PlayRecord, recordKey: string, skipFetch = false): Promise<{ shouldUpdate: boolean; latestTotalEpisodes: number }> {
+  // 🔧 优化：默认使用缓存数据，除非明确要求从数据库读取（skipFetch = false）
   let originalEpisodes = existingRecord.original_episodes || existingRecord.total_episodes;
   let freshRecord = existingRecord;
 
-  try {
-    console.log(`🔍 从数据库读取最新的 original_episodes (${recordKey})...`);
-    const freshRecordsResponse = await fetch('/api/playrecords');
-    if (freshRecordsResponse.ok) {
-      const freshRecords = await freshRecordsResponse.json();
+  // 🔧 优化：只在必要时才从数据库读取（例如用户切换集数时）
+  if (!skipFetch) {
+    try {
+      console.log(`🔍 从数据库读取最新的 original_episodes (${recordKey})...`);
+      const freshRecordsResponse = await fetch('/api/playrecords');
+      if (freshRecordsResponse.ok) {
+        const freshRecords = await freshRecordsResponse.json();
 
-      // 🔑 关键修复：直接用 recordKey 匹配，确保是同一个 source+id
-      if (freshRecords[recordKey]) {
-        freshRecord = freshRecords[recordKey];
-        originalEpisodes = freshRecord.original_episodes || freshRecord.total_episodes;
+        // 🔑 关键修复：直接用 recordKey 匹配，确保是同一个 source+id
+        if (freshRecords[recordKey]) {
+          freshRecord = freshRecords[recordKey];
+          originalEpisodes = freshRecord.original_episodes || freshRecord.total_episodes;
 
-        // 🔧 自动修复：如果 original_episodes 大于当前 total_episodes，说明之前存错了
-        if (originalEpisodes > freshRecord.total_episodes) {
-          console.warn(`⚠️ 检测到错误数据：original_episodes(${originalEpisodes}) > total_episodes(${freshRecord.total_episodes})，自动修正为 ${freshRecord.total_episodes}`);
-          originalEpisodes = freshRecord.total_episodes;
-          freshRecord.original_episodes = freshRecord.total_episodes;
+          // 🔧 自动修复：如果 original_episodes 大于当前 total_episodes，说明之前存错了
+          if (originalEpisodes > freshRecord.total_episodes) {
+            console.warn(`⚠️ 检测到错误数据：original_episodes(${originalEpisodes}) > total_episodes(${freshRecord.total_episodes})，自动修正为 ${freshRecord.total_episodes}`);
+            originalEpisodes = freshRecord.total_episodes;
+            freshRecord.original_episodes = freshRecord.total_episodes;
+          }
+
+          console.log(`📚 从数据库读取到最新 original_episodes: ${existingRecord.title} (${recordKey}) = ${originalEpisodes}集`);
+        } else {
+          console.warn(`⚠️ 数据库中未找到记录: ${recordKey}`);
         }
-
-        console.log(`📚 从数据库读取到最新 original_episodes: ${existingRecord.title} (${recordKey}) = ${originalEpisodes}集`);
-      } else {
-        console.warn(`⚠️ 数据库中未找到记录: ${recordKey}`);
       }
+    } catch (error) {
+      console.warn('⚠️ 从数据库读取 original_episodes 失败，使用缓存值', error);
     }
-  } catch (error) {
-    console.warn('⚠️ 从数据库读取 original_episodes 失败，使用缓存值', error);
   }
 
   // 条件1：用户观看进度超过了原始集数（说明用户已经看了新更新的集数）
@@ -772,16 +834,28 @@ export async function getAllPlayRecords(forceRefresh = false): Promise<Record<st
 
       return cachedData;
     } else {
-      // 缓存为空，直接从 API 获取并缓存
+      // 缓存为空，直接从 API 获取并缓存（带重试）
       try {
+        console.log('📥 缓存为空，从API获取播放记录（带重试机制）');
         const freshData = await fetchFromApi<Record<string, PlayRecord>>(
-          `/api/playrecords`
+          `/api/playrecords`,
+          2 // 最多重试2次
         );
         cacheManager.cachePlayRecords(freshData);
+        console.log('✓ 成功获取并缓存播放记录');
         return freshData;
       } catch (err) {
-        console.error('获取播放记录失败:', err);
-        triggerGlobalError('获取播放记录失败');
+        console.error('❌ 获取播放记录失败（所有重试均失败）:', err);
+        const errorMessage = err instanceof Error ? err.message : '获取播放记录失败';
+
+        // 如果是超时错误，提供更友好的提示
+        if (errorMessage.includes('超时')) {
+          triggerGlobalError('网络连接超时，请检查网络或稍后重试');
+        } else {
+          triggerGlobalError('获取播放记录失败，请稍后重试');
+        }
+
+        // 返回空对象作为降级方案
         return {};
       }
     }
@@ -810,8 +884,12 @@ export async function savePlayRecord(
 ): Promise<void> {
   const key = generateStorageKey(source, id);
 
-  // 获取现有播放记录，检查是否需要设置原始集数
-  const existingRecords = await getAllPlayRecords();
+  // 🔧 优化：优先使用缓存数据，避免每次保存都请求服务器
+  // 只在缓存为空时才从服务器获取
+  let existingRecords = cacheManager.getCachedPlayRecords();
+  if (!existingRecords || Object.keys(existingRecords).length === 0) {
+    existingRecords = await getAllPlayRecords();
+  }
   const existingRecord = existingRecords[key];
 
   // 🔑 关键修复：确保 original_episodes 一定有值，否则新集数检测永远失效
@@ -830,7 +908,9 @@ export async function savePlayRecord(
 
   // 检查用户是否观看了超过原始集数的新集数
   if (existingRecord?.original_episodes && existingRecord.original_episodes > 0) {
-    const updateResult = await checkShouldUpdateOriginalEpisodes(existingRecord, record, key);
+    // 🔧 优化：在常规保存时跳过 fetch（skipFetch = true），使用缓存数据检查
+    // 这样可以避免每次保存都发送 GET 请求，大幅减少网络开销
+    const updateResult = await checkShouldUpdateOriginalEpisodes(existingRecord, record, key, true);
     if (updateResult.shouldUpdate) {
       record.original_episodes = updateResult.latestTotalEpisodes;
       // 🔑 同时更新 total_episodes 为最新值
@@ -889,25 +969,10 @@ export async function savePlayRecord(
         } catch (cacheError) {
           console.warn('清除缓存失败:', cacheError);
         }
-      } else {
-        // 🔧 优化：即使没有 _shouldClearCache 标志，也要从服务器同步最新数据以确保缓存一致性
-        // 特别是对于 kvrocks 等需要实时同步的场景
-        try {
-          const freshData = await fetchFromApi<Record<string, PlayRecord>>(`/api/playrecords`);
-          // 只有数据真正不同时才更新缓存
-          if (JSON.stringify(cachedRecords) !== JSON.stringify(freshData)) {
-            cacheManager.cachePlayRecords(freshData);
-            window.dispatchEvent(
-              new CustomEvent('playRecordsUpdated', {
-                detail: freshData,
-              })
-            );
-            console.log('✅ 播放记录已同步最新数据');
-          }
-        } catch (syncError) {
-          console.warn('同步最新播放记录失败:', syncError);
-        }
       }
+      // 🔧 优化：移除每次保存后的同步请求，因为我们已经使用乐观更新
+      // 缓存已在 line 848-850 更新，不需要每次都从服务器 GET 最新数据
+      // 只在更新集数时才需要同步（上面的 if 块已处理）
 
       // 异步更新用户统计数据（不阻塞主流程）
       updateUserStats(record).catch(err => {
