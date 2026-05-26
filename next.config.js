@@ -1,21 +1,41 @@
 /** @type {import('next').NextConfig} */
-/* eslint-disable @typescript-eslint/no-var-requires */
 
 const nextConfig = {
-  output: 'standalone',
-  eslint: {
-    dirs: ['src'],
-  },
+  // 生产环境始终使用 standalone 模式（Vercel/Docker/Render）
+  // 本地开发时（NODE_ENV !== 'production'）不使用 standalone
+  ...(process.env.NODE_ENV === 'production' ? { output: 'standalone' } : {}),
 
   reactStrictMode: false,
-  swcMinify: false,
 
-  experimental: {
-    instrumentationHook: process.env.NODE_ENV === 'production',
+  // Puppeteer/Chromium 相关包不进行 bundle（用于 Vercel serverless）
+  // 已移除 Puppeteer 依赖以减少包体积（78MB），如需恢复请取消注释并安装依赖
+  // serverExternalPackages: ['@sparticuz/chromium', 'puppeteer-core'],
+
+  // Next.js 16 使用 Turbopack，配置 SVG 加载
+  turbopack: {
+    root: __dirname,
+    rules: {
+      '*.svg': {
+        loaders: ['@svgr/webpack'],
+        as: '*.js',
+      },
+    },
   },
 
-  // Uncoment to add domain whitelist
+  // 性能优化：包体积优化和模块化导入
+  experimental: {
+    // 自动优化大型库的导入，只打包实际使用的部分
+    optimizePackageImports: [
+      'lucide-react',
+      '@heroicons/react',
+      'framer-motion',
+      'react-icons',
+    ],
+  },
+
+  // 图片优化配置
   images: {
+    // 禁用 Next.js 图片优化（代理图片不兼容）
     unoptimized: true,
     remotePatterns: [
       {
@@ -28,52 +48,6 @@ const nextConfig = {
       },
     ],
   },
-
-  webpack(config) {
-    // Grab the existing rule that handles SVG imports
-    const fileLoaderRule = config.module.rules.find((rule) =>
-      rule.test?.test?.('.svg')
-    );
-
-    config.module.rules.push(
-      // Reapply the existing rule, but only for svg imports ending in ?url
-      {
-        ...fileLoaderRule,
-        test: /\.svg$/i,
-        resourceQuery: /url/, // *.svg?url
-      },
-      // Convert all other *.svg imports to React components
-      {
-        test: /\.svg$/i,
-        issuer: { not: /\.(css|scss|sass)$/ },
-        resourceQuery: { not: /url/ }, // exclude if *.svg?url
-        loader: '@svgr/webpack',
-        options: {
-          dimensions: false,
-          titleProp: true,
-        },
-      }
-    );
-
-    // Modify the file loader rule to ignore *.svg, since we have it handled now.
-    fileLoaderRule.exclude = /\.svg$/i;
-
-    config.resolve.fallback = {
-      ...config.resolve.fallback,
-      net: false,
-      tls: false,
-      crypto: false,
-    };
-
-    return config;
-  },
 };
 
-const withPWA = require('next-pwa')({
-  dest: 'public',
-  disable: process.env.NODE_ENV === 'development',
-  register: true,
-  skipWaiting: true,
-});
-
-module.exports = withPWA(nextConfig);
+module.exports = nextConfig;

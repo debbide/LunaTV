@@ -78,7 +78,13 @@ async function setCache(key: string, data: any, expireSeconds: number): Promise<
 async function cleanExpiredCache(): Promise<void> {
   try {
     // 清理统一存储中的过期缓存
-    await ClientCache.clearExpired('shortdrama-');
+    // 静默处理错误，避免在没有数据时产生401错误
+    try {
+      await ClientCache.clearExpired('shortdrama-');
+    } catch (e) {
+      // 静默处理：如果缓存为空或请求失败，不影响应用运行
+      // 这是正常情况，不需要警告
+    }
 
     // 清理localStorage中的过期缓存
     if (typeof localStorage !== 'undefined') {
@@ -106,13 +112,42 @@ async function cleanExpiredCache(): Promise<void> {
   }
 }
 
+// 强制清除推荐缓存（用于修复缓存了空数据的情况）
+async function clearRecommendsCache(): Promise<void> {
+  try {
+    // 清除所有推荐相关的缓存key
+    const cacheKey = getCacheKey('recommends', {});
+    await ClientCache.delete(cacheKey);
+
+    // 也清除带参数的缓存
+    const cacheKeyWithSize = getCacheKey('recommends', { size: 8 });
+    await ClientCache.delete(cacheKeyWithSize);
+
+    // 清理localStorage中的推荐缓存
+    if (typeof localStorage !== 'undefined') {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('shortdrama-recommends')) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach(key => localStorage.removeItem(key));
+    }
+
+    console.log('短剧推荐缓存已清除');
+  } catch (e) {
+    console.warn('清除短剧推荐缓存失败:', e);
+  }
+}
+
 // 初始化缓存系统（参考豆瓣实现）
 async function initShortdramaCache(): Promise<void> {
   // 立即清理一次过期缓存
   await cleanExpiredCache();
 
-  // 每10分钟清理一次过期缓存
-  setInterval(() => cleanExpiredCache(), 10 * 60 * 1000);
+  // 每1小时清理一次过期缓存
+  setInterval(() => cleanExpiredCache(), 60 * 60 * 1000);
 
   console.log('短剧缓存系统已初始化');
 }
@@ -128,4 +163,5 @@ export {
   getCache,
   setCache,
   cleanExpiredCache,
+  clearRecommendsCache,
 };

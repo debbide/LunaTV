@@ -1,8 +1,11 @@
+import ipaddr from 'ipaddr.js';
 import { NextRequest, NextResponse } from 'next/server';
 
+import { getSpiderJarFromBlob, uploadSpiderJarToBlob } from '@/lib/blobStorage';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
 import { getSpiderJar, getCandidates } from '@/lib/spiderJar';
+import { DEFAULT_USER_AGENT } from '@/lib/user-agent';
 
 // Helper function to get base URL with SITE_BASE env support
 function getBaseUrl(request: NextRequest): string {
@@ -14,6 +17,17 @@ function getBaseUrl(request: NextRequest): string {
   const host = request.headers.get('host') || 'localhost:3000';
   const protocol = request.headers.get('x-forwarded-proto') || 'http';
   return `${protocol}://${host}`;
+}
+
+// 检测是否为IP地址（用于spider.jar兼容性优化）
+function isIPAddress(host: string): boolean {
+  // 移除端口号
+  const hostWithoutPort = host.split(':')[0];
+  // IPv4 正则
+  const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
+  // IPv6 正则（简化版）
+  const ipv6Regex = /^[\da-fA-F:]+$/;
+  return ipv4Regex.test(hostWithoutPort) || ipv6Regex.test(hostWithoutPort);
 }
 
 // 生产环境使用Redis/Upstash/Kvrocks的频率限制
@@ -154,6 +168,7 @@ interface TVBoxConfig {
   spider_tried?: number; // 尝试次数
   spider_success?: boolean; // 是否成功获取远程 jar
   spider_candidates?: string[]; // 候选地址列表
+  spider_ip_access_warning?: string; // IP访问警告信息
 }
 
 export async function GET(request: NextRequest) {
@@ -163,10 +178,12 @@ export async function GET(request: NextRequest) {
     const mode = (searchParams.get('mode') || '').toLowerCase(); // 支持safe|min模式
     const token = searchParams.get('token'); // 获取token参数
     const forceSpiderRefresh = searchParams.get('forceSpiderRefresh') === '1'; // 强制刷新spider缓存
+    const filterParam = searchParams.get('filter'); // 成人内容过滤控制参数
 
     // 读取当前配置
     const config = await getConfig();
     const securityConfig = config.TVBoxSecurityConfig;
+    const proxyConfig = config.TVBoxProxyConfig; // 🔑 读取代理配置
 
     // 🔑 新增：基于用户 Token 的身份识别
     let currentUser: { username: string; tvboxEnabledSources?: string[]; showAdultContent?: boolean } | null = null;
@@ -215,26 +232,32 @@ export async function GET(request: NextRequest) {
       const isAllowed = securityConfig.allowedIPs.some(allowedIP => {
         const trimmedIP = allowedIP.trim();
         if (trimmedIP === '*') return true;
-        
-        // 支持CIDR格式检查
-        if (trimmedIP.includes('/')) {
-          // 简单的CIDR匹配（实际生产环境建议使用专门的库）
-          const [network, mask] = trimmedIP.split('/');
-          const networkParts = network.split('.').map(Number);
-          const clientParts = clientIP.split('.').map(Number);
-          const maskBits = parseInt(mask, 10);
-          
-          // 简化的子网匹配逻辑
-          if (maskBits >= 24) {
-            const networkPrefix = networkParts.slice(0, 3).join('.');
-            const clientPrefix = clientParts.slice(0, 3).join('.');
-            return networkPrefix === clientPrefix;
+
+        try {
+          // 使用 ipaddr.js 处理 IPv4/IPv6 地址和 CIDR
+          // process() 会将 IPv4-mapped IPv6 (::ffff:x.x.x.x) 转换为 IPv4
+          const clientAddr = ipaddr.process(clientIP);
+
+          // 支持 CIDR 格式检查
+          if (trimmedIP.includes('/')) {
+            const [network, prefixLength] = ipaddr.parseCIDR(trimmedIP);
+            // 确保地址类型匹配（IPv4 vs IPv6）
+            if (clientAddr.kind() === network.kind()) {
+              return clientAddr.match(network, prefixLength);
+            }
+            return false;
           }
-          
-          return clientIP.startsWith(network.split('.').slice(0, 2).join('.'));
+
+          // 单个 IP 地址匹配
+          const allowedAddr = ipaddr.process(trimmedIP);
+          if (clientAddr.kind() === allowedAddr.kind()) {
+            return clientAddr.toString() === allowedAddr.toString();
+          }
+          return false;
+        } catch {
+          // 如果解析失败，回退到简单字符串匹配
+          return clientIP === trimmedIP;
         }
-        
-        return clientIP === trimmedIP;
       });
       
       if (!isAllowed) {
@@ -283,6 +306,8 @@ export async function GET(request: NextRequest) {
     let enabledSources = sourceConfigs.filter(source => !source.disabled && source.api && source.api.trim() !== '');
 
     // 🔑 成人内容过滤：确定成人内容显示权限，优先级：用户 > 用户组 > 全局
+    // 🛡️ 纵深防御第一层：filter 参数控制（默认启用过滤，只有显式传 filter=off 才关闭）
+    const shouldFilterAdult = filterParam !== 'off'; // 默认启用过滤
     let showAdultContent = config.SiteConfig.ShowAdultContent;
 
     if (currentUser) {
@@ -315,10 +340,14 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // 过滤成人内容源
-    if (!showAdultContent) {
+    // 应用过滤逻辑：filter 参数和用户权限都要满足
+    if (shouldFilterAdult && !showAdultContent) {
       enabledSources = enabledSources.filter(source => !source.is_adult);
-      console.log(`[TVBox] 成人内容过滤已启用，剩余源数量: ${enabledSources.length}`);
+      console.log(`[TVBox] 🛡️ 成人内容过滤已启用（filter=${filterParam || 'default'}, showAdultContent=${showAdultContent}），剩余源数量: ${enabledSources.length}`);
+    } else if (!shouldFilterAdult) {
+      console.log(`[TVBox] ⚠️ 成人内容过滤已通过 filter=off 显式关闭`);
+    } else if (showAdultContent) {
+      console.log(`[TVBox] ℹ️ 用户有成人内容访问权限，未过滤成人源`);
     }
 
     // 🔑 新增：应用用户的源限制（如果有）
@@ -427,7 +456,7 @@ export async function GET(request: NextRequest) {
           // 苹果CMS接口优化配置
           siteHeader = {
             'User-Agent':
-              'Mozilla/5.0 (Linux; Android 11; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Mobile Safari/537.36',
+              DEFAULT_USER_AGENT,
             Accept: 'application/json, text/plain, */*',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
             'Cache-Control': 'no-cache',
@@ -492,11 +521,50 @@ export async function GET(request: NextRequest) {
           return ["电影", "电视剧", "综艺", "动漫", "纪录片", "短剧"];
         });
 
+        // 🔑 Cloudflare Worker 代理：为每个源生成唯一的代理路径
+        let finalApi = source.api;
+        if (proxyConfig?.enabled && proxyConfig.proxyUrl) {
+          // 🔍 检查并提取真实 API 地址（如果已有代理，先去除旧代理）
+          let realApiUrl = source.api;
+          const urlMatch = source.api.match(/[?&]url=([^&]+)/);
+          if (urlMatch) {
+            // 已有代理前缀，提取真实 URL
+            realApiUrl = decodeURIComponent(urlMatch[1]);
+            console.log(`[TVBox Proxy] ${source.name}: 检测到旧代理，替换为新代理`);
+          }
+
+          // 提取源的唯一标识符（从真实域名中提取）
+          const extractSourceId = (apiUrl: string): string => {
+            try {
+              const url = new URL(apiUrl);
+              const hostname = url.hostname;
+              const parts = hostname.split('.');
+
+              // 如果是 caiji.xxx.com 或 api.xxx.com 格式，取倒数第二部分
+              if (parts.length >= 3 && (parts[0] === 'caiji' || parts[0] === 'api' || parts[0] === 'cj' || parts[0] === 'www')) {
+                return parts[parts.length - 2].toLowerCase().replace(/[^a-z0-9]/g, '');
+              }
+
+              // 否则取第一部分（去掉 zyapi/zy 等后缀）
+              let name = parts[0].toLowerCase();
+              name = name.replace(/zyapi$/, '').replace(/zy$/, '').replace(/api$/, '');
+              return name.replace(/[^a-z0-9]/g, '') || 'source';
+            } catch {
+              return source.key || source.name.replace(/[^a-z0-9]/g, '');
+            }
+          };
+
+          const sourceId = extractSourceId(realApiUrl);
+          const proxyBaseUrl = proxyConfig.proxyUrl.replace(/\/$/, ''); // 去掉结尾的斜杠
+          finalApi = `${proxyBaseUrl}/p/${sourceId}?url=${encodeURIComponent(realApiUrl)}`;
+          console.log(`[TVBox Proxy] ${source.name}: ✓ 已应用代理`);
+        }
+
         return {
           key: source.key || source.name,
           name: source.name,
           type: type, // 使用智能判断的type
-          api: source.api,
+          api: finalApi, // 🔑 使用代理后的 API 地址（如果启用）
           searchable: 1, // 可搜索
           quickSearch: 1, // 支持快速搜索
           filterable: 1, // 支持分类筛选
@@ -696,34 +764,61 @@ export async function GET(request: NextRequest) {
     // 使用新的 Spider Jar 管理逻辑（下载真实 jar + 缓存）
     const jarInfo = await getSpiderJar(forceSpiderRefresh);
 
-    // 🔑 最终策略：优先使用远程公网 jar，失败时使用本地代理
-    let finalSpiderUrl: string;
+    // 🔑 检测是否为IP地址访问（用于兼容性优化）
+    const host = request.headers.get('host') || 'localhost:3000';
+    const isIPAccess = isIPAddress(host);
 
-    if (jarInfo.success && jarInfo.source !== 'fallback') {
-      // 成功获取远程 jar，直接使用远程 URL（公网地址，减轻服务器负载）
-      finalSpiderUrl = `${jarInfo.source};md5;${jarInfo.md5}`;
-      console.log(`[Spider] 使用远程公网 jar: ${jarInfo.source}`);
-    } else {
-      // 远程失败，使用本地代理端点（确保100%可用）
-      finalSpiderUrl = `${baseUrl}/api/proxy/spider.jar;md5;${jarInfo.md5}`;
-      console.warn(`[Spider] 远程 jar 获取失败，使用本地代理: ${finalSpiderUrl.split(';')[0]}`);
+    // 🔑 混合策略：优先使用 Vercel Blob CDN，降级到本地代理
+    // Blob CDN: 全球加速，减轻服务器负载（仅 Vercel 部署可用）
+    // 本地代理: 兼容所有部署环境，确保 100% 可用
+    let finalSpiderUrl = `${baseUrl}/api/proxy/spider.jar;md5;${jarInfo.md5}`;
+
+    // 尝试使用 Blob CDN（仅 Vercel 环境）
+    if (!globalSpiderJar) {
+      const blobJar = await getSpiderJarFromBlob();
+      if (blobJar) {
+        // Blob 存在，使用 CDN（优先使用CDN，即使是IP访问也可以用CDN）
+        finalSpiderUrl = `${blobJar.url};md5;${jarInfo.md5}`;
+        console.log(`[Spider] ✅ Using Blob CDN: ${blobJar.url}`);
+      } else {
+        // Blob 不存在，异步上传（不阻塞响应）
+        console.log(`[Spider] Blob CDN not available, using proxy`);
+        if (jarInfo.success && jarInfo.source !== 'fallback') {
+          uploadSpiderJarToBlob(jarInfo.buffer, jarInfo.md5, jarInfo.source).catch(
+            (err) => console.error('[Spider] Blob upload failed:', err)
+          );
+        }
+
+        // 🔑 IP地址访问优化：当检测到IP访问且无CDN时，尝试使用原始源URL
+        // 某些TVBox版本对IP地址的本地代理URL解析有问题
+        // 策略：如果jar来自可靠的远程源，直接使用远程源URL
+        if (isIPAccess && jarInfo.success && jarInfo.source !== 'fallback') {
+          // 使用原始远程源URL，避免IP地址解析问题
+          finalSpiderUrl = `${jarInfo.source};md5;${jarInfo.md5}`;
+          console.log(`[Spider] ⚠️ IP访问检测到，使用远程源URL以提高兼容性: ${jarInfo.source}`);
+        }
+      }
     }
 
-    // 如果用户源配置中有自定义jar，优先使用（但必须是公网地址）
-    if (globalSpiderJar) {
-      try {
-        const jarUrl = new URL(globalSpiderJar.split(';')[0]);
-        if (!isPrivateHost(jarUrl.hostname)) {
-          // 用户自定义的公网 jar，直接使用
-          finalSpiderUrl = globalSpiderJar;
-          console.log(`[Spider] 使用用户自定义 jar: ${globalSpiderJar}`);
-        } else {
-          console.warn(`[Spider] 用户配置的jar是私网地址，使用自动选择结果`);
-        }
-      } catch {
-        // URL解析失败，使用自动选择结果
-        console.warn(`[Spider] 用户配置的jar解析失败，使用自动选择结果`);
+    // 🔑 处理用户自定义 jar（优先级：全局配置 > 源站配置）
+    const customJarFromConfig = config.CustomSpiderJar; // 从管理后台配置读取
+    const customJarToUse = customJarFromConfig || globalSpiderJar;
+
+    if (customJarToUse) {
+      const customJarUrl = customJarToUse.split(';')[0];
+      console.log(`[Spider] 自定义 jar: ${customJarUrl}${customJarFromConfig ? ' (全局配置)' : ' (源站配置)'}，通过代理提供`);
+      // 自定义jar时，如果是IP访问，直接使用自定义URL而不是通过代理
+      if (isIPAccess) {
+        finalSpiderUrl = `${customJarUrl};md5;${jarInfo.md5}`;
+        console.log(`[Spider] ⚠️ IP访问 + 自定义jar，直接使用自定义URL`);
+      } else {
+        finalSpiderUrl = `${baseUrl}/api/proxy/spider.jar?url=${encodeURIComponent(customJarUrl)};md5;${jarInfo.md5}`;
       }
+    }
+
+    // 🔑 添加IP访问警告到配置中（帮助用户诊断）
+    if (isIPAccess) {
+      tvboxConfig.spider_ip_access_warning = '检测到IP地址访问，已自动优化spider URL。如仍有问题，建议设置SITE_BASE环境变量为完整域名。';
     }
 
     // 设置 spider 字段和状态透明化字段
@@ -759,7 +854,7 @@ export async function GET(request: NextRequest) {
           } else {
             fastSite.header = {
               'User-Agent':
-                'Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36',
+                DEFAULT_USER_AGENT,
               Connection: 'close',
             };
           }
@@ -844,7 +939,8 @@ export async function GET(request: NextRequest) {
     // 根据format参数返回不同格式
     if (format === 'base64' || format === 'txt') {
       // 返回base64编码的配置（TVBox常用格式）
-      const configStr = JSON.stringify(tvboxConfig, null, 2);
+      // 使用紧凑格式减小文件大小，提升网络传输成功率
+      const configStr = JSON.stringify(tvboxConfig, null, 0);
       const base64Config = Buffer.from(configStr).toString('base64');
 
       return new NextResponse(base64Config, {
@@ -853,18 +949,33 @@ export async function GET(request: NextRequest) {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET',
           'Access-Control-Allow-Headers': 'Content-Type',
-          'Cache-Control': 'no-cache, no-store, must-revalidate'
+          // 🚨 严格禁止缓存，确保影视仓等客户端每次获取最新配置（解决电信网络缓存问题）
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+          'Pragma': 'no-cache',
+          'Expires': '0'
         }
       });
     } else {
       // 返回JSON格式（使用 text/plain 提高 TVBox 分支兼容性）
-      return new NextResponse(JSON.stringify(tvboxConfig), {
+      // 确保数字类型字段为数字，提升兼容性
+      const responseContent = JSON.stringify(tvboxConfig, (key, value) => {
+        // 数字类型的字段确保为数字
+        if (['type', 'searchable', 'quickSearch', 'filterable'].includes(key)) {
+          return typeof value === 'string' ? parseInt(value) || 0 : value;
+        }
+        return value;
+      }, 0); // 紧凑格式，不使用缩进，减小文件大小
+
+      return new NextResponse(responseContent, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET',
           'Access-Control-Allow-Headers': 'Content-Type',
-          'Cache-Control': 'no-cache, no-store, must-revalidate'
+          // 🚨 严格禁止缓存，确保影视仓等客户端每次获取最新配置（解决电信网络缓存问题）
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+          'Pragma': 'no-cache',
+          'Expires': '0'
         }
       });
     }

@@ -23,6 +23,7 @@ interface CacheStats {
   danmu: { count: number; size: number };
   netdisk: { count: number; size: number };
   youtube: { count: number; size: number };
+  bilibili: { count: number; size: number };
   search: { count: number; size: number };
   other: { count: number; size: number };
   total: { count: number; size: number };
@@ -34,6 +35,7 @@ interface CacheStats {
     danmu: string;
     netdisk: string;
     youtube: string;
+    bilibili: string;
     search: string;
     other: string;
     total: string;
@@ -90,6 +92,13 @@ const CACHE_TYPES: CacheType[] = [
     description: 'YouTube视频搜索结果缓存（API和演示模式）',
     icon: VideoCameraIcon,
     color: 'text-red-600 bg-red-100'
+  },
+  {
+    key: 'bilibili',
+    name: 'Bilibili搜索',
+    description: 'Bilibili视频和番剧搜索结果缓存',
+    icon: VideoCameraIcon,
+    color: 'text-pink-600 bg-pink-100'
   }
 ];
 
@@ -220,7 +229,7 @@ export default function CacheManager() {
 
       {/* 总览统计 */}
       {stats && (
-        <div className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-lg p-6 text-white">
+        <div className="bg-linear-to-r from-blue-500 to-blue-600 rounded-lg p-6 text-white">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="text-center">
               <div className="text-3xl font-bold">{stats.total.count}</div>
@@ -389,7 +398,7 @@ export default function CacheManager() {
           
           <div className="mt-4 text-sm text-gray-500 dark:text-gray-400">
             <p className="flex items-start">
-              <ExclamationTriangleIcon className="h-4 w-4 mr-2 mt-0.5 flex-shrink-0 text-orange-500" />
+              <ExclamationTriangleIcon className="h-4 w-4 mr-2 mt-0.5 shrink-0 text-orange-500" />
               注意：清理缓存后，相应的数据将需要重新从源服务器获取，可能会影响加载速度。
             </p>
           </div>

@@ -7,17 +7,17 @@ import { ChevronUp } from 'lucide-react';
 
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 import { PlayRecord, ReleaseCalendarItem } from '@/lib/types';
-import {
-  getCachedWatchingUpdates,
-  getDetailedWatchingUpdates,
-  checkWatchingUpdates,
-  markUpdatesAsViewed,
-  forceClearWatchingUpdatesCache,
-  type WatchingUpdate,
-} from '@/lib/watching-updates';
+import type { WatchingUpdate } from '@/hooks/useWatchingUpdates';
 
 import PageLayout from '@/components/PageLayout';
 import VideoCard from '@/components/VideoCard';
+import {
+  useAdminStatsQuery,
+  useUserStatsQuery,
+  usePlayStatsWatchingUpdatesQuery,
+  useUpcomingReleasesQuery,
+  useInvalidatePlayStats,
+} from '@/hooks/usePlayStatsQueries';
 
 // 用户等级系统
 const USER_LEVELS = [
@@ -70,20 +70,45 @@ import { PlayStatsResult } from '@/app/api/admin/play-stats/route';
 
 const PlayStatsPage: React.FC = () => {
   const router = useRouter();
-  const [statsData, setStatsData] = useState<PlayStatsResult | null>(null);
-  const [userStats, setUserStats] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [expandedUsers, setExpandedUsers] = useState<Set<string>>(new Set());
   const [authInfo, setAuthInfo] = useState<{ username?: string; role?: string } | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [showBackToTop, setShowBackToTop] = useState(false);
-  const [watchingUpdates, setWatchingUpdates] = useState<WatchingUpdate | null>(null);
   const [showWatchingUpdates, setShowWatchingUpdates] = useState(false);
   const [activeTab, setActiveTab] = useState<'admin' | 'personal'>('admin'); // 新增Tab状态
-  const [upcomingReleases, setUpcomingReleases] = useState<ReleaseCalendarItem[]>([]);
-  const [upcomingLoading, setUpcomingLoading] = useState(false);
-  const [upcomingInitialized, setUpcomingInitialized] = useState(false);
+
+  // 🚀 TanStack Query - 管理员统计数据
+  const {
+    data: statsData = null,
+    error: adminError,
+    isLoading: adminLoading,
+  } = useAdminStatsQuery(!!authInfo && isAdmin);
+
+  // 🚀 TanStack Query - 用户个人统计数据
+  const {
+    data: userStats = null,
+    error: userError,
+    isLoading: userLoading,
+  } = useUserStatsQuery(!!authInfo);
+
+  // 🚀 TanStack Query - 追番更新
+  const {
+    data: watchingUpdates = null,
+  } = usePlayStatsWatchingUpdatesQuery(!!authInfo);
+
+  // 🚀 TanStack Query - 即将上映
+  const {
+    data: upcomingReleases = [],
+    isLoading: upcomingLoading,
+  } = useUpcomingReleasesQuery(!!authInfo);
+
+  // 🚀 TanStack Query - 刷新所有数据
+  const invalidatePlayStats = useInvalidatePlayStats();
+
+  // 兼容旧代码的loading和error状态
+  const loading = isAdmin ? (adminLoading || userLoading) : userLoading;
+  const error = adminError?.message || userError?.message || null;
+  const upcomingInitialized = !upcomingLoading;
 
   // 检查用户权限
   useEffect(() => {
@@ -142,81 +167,7 @@ const PlayStatsPage: React.FC = () => {
     });
   };
 
-  // 获取管理员统计数据
-  const fetchAdminStats = useCallback(async () => {
-    try {
-      console.log('开始获取管理员统计数据...');
-      const response = await fetch('/api/admin/play-stats');
-
-      if (response.status === 401) {
-        router.push('/login');
-        return;
-      }
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || `HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      console.log('管理员统计数据获取成功:', data);
-      setStatsData(data);
-    } catch (err) {
-      console.error('获取管理员统计数据失败:', err);
-      const errorMessage =
-        err instanceof Error ? err.message : '获取播放统计失败';
-      setError(errorMessage);
-    }
-  }, [router]);
-
-  // 获取用户个人统计数据
-  const fetchUserStats = useCallback(async () => {
-    try {
-      console.log('开始获取用户个人统计数据...');
-      const response = await fetch('/api/user/my-stats');
-
-      if (response.status === 401) {
-        router.push('/login');
-        return;
-      }
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || `HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      console.log('用户个人统计数据获取成功:', data);
-      console.log('个人统计中的注册天数:', data.registrationDays);
-      console.log('个人统计中的登录天数:', data.loginDays);
-      setUserStats(data);
-    } catch (err) {
-      console.error('获取用户个人统计数据失败:', err);
-      const errorMessage =
-        err instanceof Error ? err.message : '获取个人统计失败';
-      setError(errorMessage);
-    }
-  }, [router]);
-
-  // 根据用户角色获取数据
-  const fetchStats = useCallback(async () => {
-    console.log('fetchStats 被调用, isAdmin:', isAdmin);
-    setLoading(true);
-    setError(null);
-
-    if (isAdmin) {
-      console.log('管理员模式，同时获取全站统计和个人统计');
-      // 管理员同时获取全站统计和个人统计
-      await Promise.all([fetchAdminStats(), fetchUserStats()]);
-    } else {
-      console.log('普通用户模式，只获取个人统计');
-      // 普通用户只获取个人统计
-      await fetchUserStats();
-    }
-
-    setLoading(false);
-    console.log('fetchStats 完成');
-  }, [isAdmin, fetchAdminStats, fetchUserStats]);
+  // 🚀 数据获取由 TanStack Query 自动管理
 
   // 清理过期缓存
   const cleanExpiredCache = useCallback(() => {
@@ -273,83 +224,16 @@ const PlayStatsPage: React.FC = () => {
     });
   }, []);
 
-  // 获取即将上映的内容（不再使用localStorage缓存，完全依赖API数据库缓存）
-  const fetchUpcomingReleases = useCallback(async () => {
-    try {
-      setUpcomingLoading(true);
-
-      // 清理过期的localStorage缓存（兼容性清理）
-      cleanExpiredCache();
-
-      // 🌐 直接从API获取数据（API有数据库缓存，24小时有效）
-      console.log('🌐 正在从API获取即将上映数据...');
-
-      // 获取未来2周的发布内容，包含更多电影
-      const today = new Date();
-      const twoWeeks = new Date(today);
-      twoWeeks.setDate(today.getDate() + 14);
-
-      const response = await fetch(
-        `/api/release-calendar?dateFrom=${today.toISOString().split('T')[0]}&dateTo=${twoWeeks.toISOString().split('T')[0]}`
-      );
-
-      if (response.ok) {
-        const data = await response.json();
-        const items = data.items || [];
-        setUpcomingReleases(items);
-
-        console.log(`📊 获取到 ${items.length} 条即将上映数据`);
-      } else {
-        console.error('获取即将上映内容失败:', response.status);
-        // API失败时设置空数组，确保UI仍然显示
-        setUpcomingReleases([]);
-      }
-    } catch (error) {
-      console.error('获取即将上映内容失败:', error);
-      // 网络错误时设置空数组，确保UI仍然显示
-      setUpcomingReleases([]);
-    } finally {
-      setUpcomingLoading(false);
-      setUpcomingInitialized(true); // 标记已经初始化完成
-    }
-  }, [cleanExpiredCache]);
+  // 🚀 即将上映由 TanStack Query 自动管理
 
   // 处理刷新按钮点击
   const handleRefreshClick = async () => {
     console.log('刷新按钮被点击');
-    setLoading(true);
-
     try {
-      // 清除追番更新缓存
-      localStorage.removeItem('moontv_watching_updates');
-      localStorage.removeItem('moontv_last_update_check');
-
-      // 清除遗留的即将上映缓存（兼容性清理）
-      localStorage.removeItem('upcoming_releases_cache');
-      localStorage.removeItem('upcoming_releases_cache_time');
-
-      console.log('已清除所有localStorage缓存');
-
-      // 🔧 优化：强制刷新追番更新，跳过缓存时间检查
-      await checkWatchingUpdates(true);
-      console.log('已重新检查追番更新');
-
-      // 重新获取统计数据
-      await fetchStats();
-      console.log('已重新获取统计数据');
-
-      // 重新获取 watchingUpdates
-      const details = getDetailedWatchingUpdates();
-      setWatchingUpdates(details);
-
-      // 重新获取即将上映内容（API会使用数据库缓存，速度很快）
-      await fetchUpcomingReleases();
-      console.log('已重新获取即将上映内容');
-
+      await invalidatePlayStats();
+      console.log('所有数据已刷新');
     } catch (error) {
       console.error('刷新数据失败:', error);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -394,59 +278,46 @@ const PlayStatsPage: React.FC = () => {
       ? (window as any).RUNTIME_CONFIG.STORAGE_TYPE
       : 'localstorage';
 
+  // 🚀 数据获取由 TanStack Query 的 enabled 选项自动控制
+  // 当 authInfo 和 isAdmin 变化时，queries 自动重新执行
+
+  // 处理401重定向
   useEffect(() => {
-    if (authInfo) {
-      fetchStats();
+    if (adminError?.message === 'UNAUTHORIZED' || userError?.message === 'UNAUTHORIZED') {
+      router.push('/login');
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authInfo]); // ✅ 只在 authInfo 变化时调用
+  }, [adminError, userError, router]);
 
-  // 获取即将上映内容
+  // 监听播放记录更新事件，刷新追番数据
   useEffect(() => {
-    if (authInfo) {
-      fetchUpcomingReleases();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authInfo]); // ✅ 只在 authInfo 变化时调用
+    if (!authInfo) return;
 
-  // 追番更新检查
-  useEffect(() => {
-    if (authInfo) {
-      const checkUpdates = async () => {
-        const cached = getCachedWatchingUpdates();
-        if (cached) {
-          const details = getDetailedWatchingUpdates();
-          setWatchingUpdates(details);
-        } else {
-          await checkWatchingUpdates();
-          const details = getDetailedWatchingUpdates();
-          setWatchingUpdates(details);
-        }
-      };
+    let updateTimeout: ReturnType<typeof setTimeout> | null = null;
+    const handlePlayRecordsUpdate = () => {
+      console.log('播放记录更新，重新检查 watchingUpdates');
 
-      checkUpdates();
+      // 🔧 防抖：避免无限循环，1秒内只执行一次
+      if (updateTimeout) {
+        console.log('⏸️ 防抖：跳过本次更新请求');
+        return;
+      }
 
-      // 监听播放记录更新事件（修复删除记录后页面不立即更新的问题）
-      const handlePlayRecordsUpdate = () => {
-        console.log('播放记录更新，重新检查 watchingUpdates');
-        // 🔧 优化：使用新的强制清除缓存函数
-        forceClearWatchingUpdatesCache();
-        // 🔧 优化：强制刷新追番更新状态，跳过缓存时间检查
-        checkWatchingUpdates(true).then(() => {
-          const details = getDetailedWatchingUpdates();
-          setWatchingUpdates(details);
-          console.log('watchingUpdates 已更新:', details);
-        });
-      };
+      updateTimeout = setTimeout(() => {
+        updateTimeout = null;
+      }, 1000);
 
-      // 监听播放记录更新事件
-      window.addEventListener('playRecordsUpdated', handlePlayRecordsUpdate);
+      invalidatePlayStats();
+    };
 
-      return () => {
-        window.removeEventListener('playRecordsUpdated', handlePlayRecordsUpdate);
-      };
-    }
-  }, [authInfo]);
+    window.addEventListener('playRecordsUpdated', handlePlayRecordsUpdate);
+
+    return () => {
+      window.removeEventListener('playRecordsUpdated', handlePlayRecordsUpdate);
+      if (updateTimeout) {
+        clearTimeout(updateTimeout);
+      }
+    };
+  }, [authInfo, invalidatePlayStats]);
 
   // 处理追番更新卡片点击
   const handleWatchingUpdatesClick = () => {
@@ -480,8 +351,6 @@ const PlayStatsPage: React.FC = () => {
   // 关闭追番更新详情
   const handleCloseWatchingUpdates = () => {
     setShowWatchingUpdates(false);
-    markUpdatesAsViewed();
-    setWatchingUpdates(prev => prev ? { ...prev, hasUpdates: false, updatedCount: 0, continueWatchingCount: 0 } : null);
   };
 
   // 格式化更新时间
@@ -589,7 +458,7 @@ const PlayStatsPage: React.FC = () => {
   if (storageType === 'localstorage') {
     return (
       <PageLayout activePath="/play-stats">
-        <div className='max-w-6xl mx-auto px-4 py-8'>
+        <div className='max-w-6xl mx-auto px-4 py-8 pb-40 md:pb-safe-bottom'>
           <div className='mb-8'>
             <h1 className='text-3xl font-bold text-gray-900 dark:text-white'>
               {isAdmin ? '播放统计' : '个人统计'}
@@ -637,7 +506,7 @@ const PlayStatsPage: React.FC = () => {
   if (isAdmin && statsData && userStats) {
     return (
       <PageLayout activePath="/play-stats">
-        <div className='max-w-7xl mx-auto px-4 py-8'>
+        <div className='max-w-7xl mx-auto px-4 py-8 pb-40 md:pb-safe-bottom'>
           {/* 页面标题和描述 */}
           <div className='mb-6'>
             <h1 className='text-3xl font-bold text-gray-900 dark:text-white'>
@@ -921,7 +790,7 @@ const PlayStatsPage: React.FC = () => {
                       >
                         <div className='flex items-center justify-between'>
                           <div className='flex items-center space-x-4'>
-                            <div className='flex-shrink-0'>
+                            <div className='shrink-0'>
                               <div className='w-10 h-10 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center'>
                                 <span className='text-sm font-medium text-blue-600 dark:text-blue-400'>
                                   {userStat.username.charAt(0).toUpperCase()}
@@ -955,7 +824,7 @@ const PlayStatsPage: React.FC = () => {
                                   return (
                                     <div className="space-y-1">
                                       <div className="flex items-center gap-1.5">
-                                        <span className="text-base flex-shrink-0">{loginDisplay.level.icon}</span>
+                                        <span className="text-base shrink-0">{loginDisplay.level.icon}</span>
                                         <span className="font-medium text-gray-700 dark:text-gray-300 text-xs leading-tight">
                                           {loginDisplay.level.name}
                                         </span>
@@ -999,7 +868,7 @@ const PlayStatsPage: React.FC = () => {
                                 平均时长
                               </div>
                             </div>
-                            <div className='flex-shrink-0'>
+                            <div className='shrink-0'>
                               <svg
                                 className={`w-5 h-5 text-gray-400 transition-transform ${
                                   expandedUsers.has(userStat.username)
@@ -1037,7 +906,7 @@ const PlayStatsPage: React.FC = () => {
                                     className='flex items-center space-x-4 p-3 bg-white dark:bg-gray-800 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors'
                                     onClick={() => handlePlayRecord(record)}
                                   >
-                                    <div className='flex-shrink-0 w-12 h-16 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden'>
+                                    <div className='shrink-0 w-12 h-16 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden'>
                                       {record.cover ? (
                                         <Image
                                           src={record.cover}
@@ -1107,7 +976,7 @@ const PlayStatsPage: React.FC = () => {
                                         </div>
                                       </div>
                                     </div>
-                                    <div className='flex-shrink-0 text-right'>
+                                    <div className='shrink-0 text-right'>
                                       <div className='text-xs text-gray-500 dark:text-gray-400'>
                                         {formatDateTime(record.save_time)}
                                       </div>
@@ -1202,7 +1071,7 @@ const PlayStatsPage: React.FC = () => {
                     return (
                       <div className="space-y-2">
                         <div className='flex items-center gap-2'>
-                          <span className="text-2xl flex-shrink-0">{loginDisplay.level.icon}</span>
+                          <span className="text-2xl shrink-0">{loginDisplay.level.icon}</span>
                           <div className="flex-1 min-w-0">
                             <div className="text-base font-bold text-red-800 dark:text-red-300 leading-tight">
                               {loginDisplay.level.name}
@@ -1289,7 +1158,7 @@ const PlayStatsPage: React.FC = () => {
               {/* 即将上映卡片 */}
               {(upcomingInitialized || upcomingLoading) && (
                 <div className="mb-8">
-                  <div className="bg-gradient-to-r from-purple-500 to-pink-500 rounded-lg p-6 text-white shadow-lg">
+                  <div className="bg-linear-to-r from-purple-500 to-pink-500 rounded-lg p-6 text-white shadow-lg">
                     <div className="flex items-center justify-between mb-4">
                       <div>
                         <h3 className="text-lg font-bold flex items-center gap-2">
@@ -1332,7 +1201,7 @@ const PlayStatsPage: React.FC = () => {
                               </div>
                               <div className="flex space-x-3 overflow-x-auto pb-1 w-full">
                                 {upcomingReleases.filter(item => item.type === 'movie').slice(0, 7).map(item => (
-                                  <div key={item.id} className="min-w-[140px] bg-white/10 backdrop-blur-sm rounded-lg p-3 border border-white/20 flex-shrink-0">
+                                  <div key={item.id} className="min-w-[140px] bg-white/10 backdrop-blur-sm rounded-lg p-3 border border-white/20 shrink-0">
                                     <div className="text-sm font-medium mb-1 line-clamp-2" title={item.title}>
                                       {item.title}
                                     </div>
@@ -1356,7 +1225,7 @@ const PlayStatsPage: React.FC = () => {
                               </div>
                               <div className="flex space-x-3 overflow-x-auto pb-1 w-full">
                                 {upcomingReleases.filter(item => item.type === 'tv').slice(0, 7).map(item => (
-                                  <div key={item.id} className="min-w-[140px] bg-white/10 backdrop-blur-sm rounded-lg p-3 border border-white/20 flex-shrink-0">
+                                  <div key={item.id} className="min-w-[140px] bg-white/10 backdrop-blur-sm rounded-lg p-3 border border-white/20 shrink-0">
                                     <div className="text-sm font-medium mb-1 line-clamp-2" title={item.title}>
                                       {item.title}
                                     </div>
@@ -1413,7 +1282,7 @@ const PlayStatsPage: React.FC = () => {
                         .filter(series => series.hasNewEpisode)
                         .map((series, index) => (
                           <div key={`new-${series.title}_${series.year}_${index}`} className="relative w-full group/card">
-                            <div className="relative group-hover/card:z-[5] transition-all duration-300 ease-in-out">
+                            <div className="relative group-hover/card:z-5 transition-all duration-300 ease-in-out">
                               <VideoCard
                                 title={series.title}
                                 poster={series.cover || ''}
@@ -1428,11 +1297,11 @@ const PlayStatsPage: React.FC = () => {
                                 remarks={series.remarks}
                               />
                               {/* 新集数提示光环效果 */}
-                              <div className="absolute inset-0 rounded-lg ring-2 ring-red-400 ring-opacity-50 animate-pulse pointer-events-none z-[9] transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
+                              <div className="absolute inset-0 rounded-lg ring-2 ring-red-400/50 animate-pulse pointer-events-none z-9 transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
                             </div>
-                            {/* 新集数徽章 */}
-                            <div className="absolute -top-2 -right-2 bg-gradient-to-r from-red-500 to-pink-500 text-white text-xs px-2 py-1 rounded-full shadow-lg animate-bounce z-10">
-                              +{series.newEpisodes}集
+                            {/* 新集数徽章 - Netflix 统一风格 */}
+                            <div className="absolute -top-2 -right-2 bg-red-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold">
+                              +{series.newEpisodes}
                             </div>
                           </div>
                         ))}
@@ -1446,7 +1315,7 @@ const PlayStatsPage: React.FC = () => {
                         .filter(series => series.hasNewEpisode)
                         .map((series, index) => (
                           <div key={`new-${series.title}_${series.year}_${index}`} className="relative w-full group/card">
-                            <div className="relative group-hover/card:z-[5] transition-all duration-300 ease-in-out">
+                            <div className="relative group-hover/card:z-5 transition-all duration-300 ease-in-out">
                               <VideoCard
                                 title={series.title}
                                 poster={series.cover || ''}
@@ -1461,11 +1330,11 @@ const PlayStatsPage: React.FC = () => {
                                 remarks={series.remarks}
                               />
                               {/* 新集数提示光环效果 */}
-                              <div className="absolute inset-0 rounded-lg ring-2 ring-red-400 ring-opacity-50 animate-pulse pointer-events-none z-[9] transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
+                              <div className="absolute inset-0 rounded-lg ring-2 ring-red-400/50 animate-pulse pointer-events-none z-9 transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
                             </div>
-                            {/* 新集数徽章 */}
-                            <div className="absolute -top-2 -right-2 bg-gradient-to-r from-red-500 to-pink-500 text-white text-xs px-2 py-1 rounded-full shadow-lg animate-bounce z-10">
-                              +{series.newEpisodes}集
+                            {/* 新集数徽章 - Netflix 统一风格 */}
+                            <div className="absolute -top-2 -right-2 bg-red-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold">
+                              +{series.newEpisodes}
                             </div>
                           </div>
                         ))}
@@ -1496,7 +1365,7 @@ const PlayStatsPage: React.FC = () => {
                         .filter(series => series.hasContinueWatching && !series.hasNewEpisode)
                         .map((series, index) => (
                           <div key={`continue-${series.title}_${series.year}_${index}`} className="relative w-full group/card">
-                            <div className="relative group-hover/card:z-[5] transition-all duration-300 ease-in-out">
+                            <div className="relative group-hover/card:z-5 transition-all duration-300 ease-in-out">
                               <VideoCard
                                 title={series.title}
                                 poster={series.cover || ''}
@@ -1511,10 +1380,10 @@ const PlayStatsPage: React.FC = () => {
                                 remarks={series.remarks}
                               />
                               {/* 继续观看提示光环效果 */}
-                              <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400 ring-opacity-50 animate-pulse pointer-events-none z-[9] transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
+                              <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400/50 animate-pulse pointer-events-none z-9 transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
                             </div>
-                            {/* 继续观看徽章 */}
-                            <div className="absolute -top-2 -right-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-xs px-2 py-1 rounded-full shadow-lg animate-pulse z-10">
+                            {/* 继续观看徽章 - Netflix 统一风格 */}
+                            <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold">
                               继续看
                             </div>
                           </div>
@@ -1529,7 +1398,7 @@ const PlayStatsPage: React.FC = () => {
                         .filter(series => series.hasContinueWatching && !series.hasNewEpisode)
                         .map((series, index) => (
                           <div key={`continue-${series.title}_${series.year}_${index}`} className="relative w-full group/card">
-                            <div className="relative group-hover/card:z-[5] transition-all duration-300 ease-in-out">
+                            <div className="relative group-hover/card:z-5 transition-all duration-300 ease-in-out">
                               <VideoCard
                                 title={series.title}
                                 poster={series.cover || ''}
@@ -1544,10 +1413,10 @@ const PlayStatsPage: React.FC = () => {
                                 remarks={series.remarks}
                               />
                               {/* 继续观看提示光环效果 */}
-                              <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400 ring-opacity-50 animate-pulse pointer-events-none z-[9] transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
+                              <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400/50 animate-pulse pointer-events-none z-9 transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
                             </div>
-                            {/* 继续观看徽章 */}
-                            <div className="absolute -top-2 -right-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-xs px-2 py-1 rounded-full shadow-lg animate-pulse z-10">
+                            {/* 继续观看徽章 - Netflix 统一风格 */}
+                            <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold">
                               继续看
                             </div>
                           </div>
@@ -1570,7 +1439,7 @@ const PlayStatsPage: React.FC = () => {
                         className='flex items-center space-x-4 p-4 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors'
                         onClick={() => handlePlayRecord(record)}
                       >
-                        <div className='flex-shrink-0 w-16 h-20 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden'>
+                        <div className='shrink-0 w-16 h-20 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden'>
                           {record.cover ? (
                             <Image
                               src={record.cover}
@@ -1661,7 +1530,7 @@ const PlayStatsPage: React.FC = () => {
         </div>
         <button
           onClick={scrollToTop}
-          className={`fixed bottom-20 md:bottom-6 right-6 z-[500] w-12 h-12 bg-green-500/90 hover:bg-green-500 text-white rounded-full shadow-lg backdrop-blur-sm transition-all duration-300 ease-in-out flex items-center justify-center group ${showBackToTop
+          className={`fixed bottom-20 md:bottom-6 right-6 z-500 w-12 h-12 bg-green-500/90 hover:bg-green-500 text-white rounded-full shadow-lg backdrop-blur-sm transition-all duration-300 ease-in-out flex items-center justify-center group ${showBackToTop
             ? 'opacity-100 translate-y-0 pointer-events-auto'
             : 'opacity-0 translate-y-4 pointer-events-none'
             }`}
@@ -1678,7 +1547,7 @@ const PlayStatsPage: React.FC = () => {
   if (!isAdmin && userStats) {
     return (
       <PageLayout activePath="/play-stats">
-        <div className='max-w-6xl mx-auto px-4 py-8'>
+        <div className='max-w-6xl mx-auto px-4 py-8 pb-40 md:pb-safe-bottom'>
           {/* 页面标题和刷新按钮 */}
           <div className='flex justify-between items-start mb-8'>
             <div>
@@ -1802,7 +1671,7 @@ const PlayStatsPage: React.FC = () => {
                 return (
                   <div className="space-y-2">
                     <div className='flex items-center gap-2'>
-                      <span className="text-2xl flex-shrink-0">{loginDisplay.level.icon}</span>
+                      <span className="text-2xl shrink-0">{loginDisplay.level.icon}</span>
                       <div className="flex-1 min-w-0">
                         <div className="text-base font-bold text-red-800 dark:text-red-300 leading-tight">
                           {loginDisplay.level.name}
@@ -1889,7 +1758,7 @@ const PlayStatsPage: React.FC = () => {
           {/* 即将上映卡片 */}
           {(upcomingInitialized || upcomingLoading) && (
             <div className="mb-8">
-              <div className="bg-gradient-to-r from-purple-500 to-pink-500 rounded-lg p-6 text-white shadow-lg">
+              <div className="bg-linear-to-r from-purple-500 to-pink-500 rounded-lg p-6 text-white shadow-lg">
                 <div className="flex items-center justify-between mb-4">
                   <div>
                     <h3 className="text-lg font-bold flex items-center gap-2">
@@ -1931,7 +1800,7 @@ const PlayStatsPage: React.FC = () => {
                           </div>
                           <div className="flex space-x-3 overflow-x-auto pb-1 w-full">
                             {upcomingReleases.filter(item => item.type === 'movie').slice(0, 7).map(item => (
-                              <div key={item.id} className="min-w-[140px] bg-white/10 backdrop-blur-sm rounded-lg p-3 border border-white/20 flex-shrink-0">
+                              <div key={item.id} className="min-w-[140px] bg-white/10 backdrop-blur-sm rounded-lg p-3 border border-white/20 shrink-0">
                                 <div className="text-sm font-medium mb-1 line-clamp-2" title={item.title}>
                                   {item.title}
                                 </div>
@@ -1955,7 +1824,7 @@ const PlayStatsPage: React.FC = () => {
                           </div>
                           <div className="flex space-x-3 overflow-x-auto pb-1 w-full">
                             {upcomingReleases.filter(item => item.type === 'tv').slice(0, 7).map(item => (
-                              <div key={item.id} className="min-w-[140px] bg-white/10 backdrop-blur-sm rounded-lg p-3 border border-white/20 flex-shrink-0">
+                              <div key={item.id} className="min-w-[140px] bg-white/10 backdrop-blur-sm rounded-lg p-3 border border-white/20 shrink-0">
                                 <div className="text-sm font-medium mb-1 line-clamp-2" title={item.title}>
                                   {item.title}
                                 </div>
@@ -2011,8 +1880,8 @@ const PlayStatsPage: React.FC = () => {
                   {watchingUpdates.updatedSeries
                     .filter(series => series.hasNewEpisode)
                     .map((series, index) => (
-                      <div key={`new-${series.title}_${series.year}_${index}`} className="relative w-full">
-                        <div className="relative">
+                      <div key={`new-${series.title}_${series.year}_${index}`} className="relative w-full group/card">
+                        <div className="relative group-hover/card:z-5 transition-all duration-300 ease-in-out">
                           <VideoCard
                             title={series.title}
                             poster={series.cover || ''}
@@ -2021,18 +1890,17 @@ const PlayStatsPage: React.FC = () => {
                             progress={0}
                             currentEpisode={series.currentEpisode}
                             episodes={series.totalEpisodes}
-                            source_name={series.source_name}
-                            source={series.source_name}
-                            id={`${series.title}_${series.year}`}
+                            source={series.sourceKey}
+                            id={series.videoId}
                             onDelete={undefined}
                             remarks={series.remarks}
                           />
                           {/* 新集数提示光环效果 */}
-                          <div className="absolute inset-0 rounded-lg ring-2 ring-red-400 ring-opacity-50 animate-pulse pointer-events-none z-[9]"></div>
+                          <div className="absolute inset-0 rounded-lg ring-2 ring-red-400/50 animate-pulse pointer-events-none z-9 transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
                         </div>
-                        {/* 新集数徽章 */}
-                        <div className="absolute -top-2 -right-2 bg-gradient-to-r from-red-500 to-pink-500 text-white text-xs px-2 py-1 rounded-full shadow-lg animate-bounce z-10">
-                          +{series.newEpisodes}集
+                        {/* 新集数徽章 - Netflix 统一风格 */}
+                        <div className="absolute -top-2 -right-2 bg-red-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold">
+                          +{series.newEpisodes}
                         </div>
                       </div>
                     ))}
@@ -2045,8 +1913,8 @@ const PlayStatsPage: React.FC = () => {
                   {watchingUpdates.updatedSeries
                     .filter(series => series.hasNewEpisode)
                     .map((series, index) => (
-                      <div key={`new-${series.title}_${series.year}_${index}`} className="relative w-full">
-                        <div className="relative">
+                      <div key={`new-${series.title}_${series.year}_${index}`} className="relative w-full group/card">
+                        <div className="relative group-hover/card:z-5 transition-all duration-300 ease-in-out">
                           <VideoCard
                             title={series.title}
                             poster={series.cover || ''}
@@ -2055,18 +1923,17 @@ const PlayStatsPage: React.FC = () => {
                             progress={0}
                             currentEpisode={series.currentEpisode}
                             episodes={series.totalEpisodes}
-                            source_name={series.source_name}
-                            source={series.source_name}
-                            id={`${series.title}_${series.year}`}
+                            source={series.sourceKey}
+                            id={series.videoId}
                             onDelete={undefined}
                             remarks={series.remarks}
                           />
                           {/* 新集数提示光环效果 */}
-                          <div className="absolute inset-0 rounded-lg ring-2 ring-red-400 ring-opacity-50 animate-pulse pointer-events-none z-[9]"></div>
+                          <div className="absolute inset-0 rounded-lg ring-2 ring-red-400/50 animate-pulse pointer-events-none z-9 transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
                         </div>
-                        {/* 新集数徽章 */}
-                        <div className="absolute -top-2 -right-2 bg-gradient-to-r from-red-500 to-pink-500 text-white text-xs px-2 py-1 rounded-full shadow-lg animate-bounce z-10">
-                          +{series.newEpisodes}集
+                        {/* 新集数徽章 - Netflix 统一风格 */}
+                        <div className="absolute -top-2 -right-2 bg-red-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold">
+                          +{series.newEpisodes}
                         </div>
                       </div>
                     ))}
@@ -2096,8 +1963,8 @@ const PlayStatsPage: React.FC = () => {
                   {watchingUpdates.updatedSeries
                     .filter(series => series.hasContinueWatching && !series.hasNewEpisode)
                     .map((series, index) => (
-                      <div key={`continue-${series.title}_${series.year}_${index}`} className="relative w-full">
-                        <div className="relative">
+                      <div key={`continue-${series.title}_${series.year}_${index}`} className="relative w-full group/card">
+                        <div className="relative group-hover/card:z-5 transition-all duration-300 ease-in-out">
                           <VideoCard
                             title={series.title}
                             poster={series.cover || ''}
@@ -2106,18 +1973,17 @@ const PlayStatsPage: React.FC = () => {
                             progress={0}
                             currentEpisode={series.currentEpisode}
                             episodes={series.totalEpisodes}
-                            source_name={series.source_name}
-                            source={series.source_name}
-                            id={`${series.title}_${series.year}`}
+                            source={series.sourceKey}
+                            id={series.videoId}
                             onDelete={undefined}
                             remarks={series.remarks}
                           />
                           {/* 继续观看提示光环效果 */}
-                          <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400 ring-opacity-50 animate-pulse pointer-events-none z-[9]"></div>
+                          <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400/50 animate-pulse pointer-events-none z-9 transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
                         </div>
-                        {/* 继续观看标识 */}
-                        <div className="absolute -top-2 -right-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-xs px-2 py-1 rounded-full shadow-lg z-10">
-                          继续观看
+                        {/* 继续观看徽章 - Netflix 统一风格 */}
+                        <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold">
+                          继续看
                         </div>
                       </div>
                     ))}
@@ -2130,8 +1996,8 @@ const PlayStatsPage: React.FC = () => {
                   {watchingUpdates.updatedSeries
                     .filter(series => series.hasContinueWatching && !series.hasNewEpisode)
                     .map((series, index) => (
-                      <div key={`continue-${series.title}_${series.year}_${index}`} className="relative w-full">
-                        <div className="relative">
+                      <div key={`continue-${series.title}_${series.year}_${index}`} className="relative w-full group/card">
+                        <div className="relative group-hover/card:z-5 transition-all duration-300 ease-in-out">
                           <VideoCard
                             title={series.title}
                             poster={series.cover || ''}
@@ -2140,18 +2006,17 @@ const PlayStatsPage: React.FC = () => {
                             progress={0}
                             currentEpisode={series.currentEpisode}
                             episodes={series.totalEpisodes}
-                            source_name={series.source_name}
-                            source={series.source_name}
-                            id={`${series.title}_${series.year}`}
+                            source={series.sourceKey}
+                            id={series.videoId}
                             onDelete={undefined}
                             remarks={series.remarks}
                           />
                           {/* 继续观看提示光环效果 */}
-                          <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400 ring-opacity-50 animate-pulse pointer-events-none z-[9]"></div>
+                          <div className="absolute inset-0 rounded-lg ring-2 ring-blue-400/50 animate-pulse pointer-events-none z-9 transition-transform duration-300 ease-in-out group-hover/card:scale-[1.05]"></div>
                         </div>
-                        {/* 继续观看标识 */}
-                        <div className="absolute -top-2 -right-2 bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-xs px-2 py-1 rounded-full shadow-lg z-10">
-                          继续观看
+                        {/* 继续观看徽章 - Netflix 统一风格 */}
+                        <div className="absolute -top-2 -right-2 bg-blue-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold">
+                          继续看
                         </div>
                       </div>
                     ))}
@@ -2173,7 +2038,7 @@ const PlayStatsPage: React.FC = () => {
                     className='flex items-center space-x-4 p-4 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors'
                     onClick={() => handlePlayRecord(record)}
                   >
-                    <div className='flex-shrink-0 w-16 h-20 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden'>
+                    <div className='shrink-0 w-16 h-20 bg-gray-200 dark:bg-gray-700 rounded overflow-hidden'>
                       {record.cover ? (
                         <Image
                           src={record.cover}
@@ -2264,7 +2129,7 @@ const PlayStatsPage: React.FC = () => {
         {/* 返回顶部悬浮按钮 */}
         <button
           onClick={scrollToTop}
-          className={`fixed bottom-20 md:bottom-6 right-6 z-[500] w-12 h-12 bg-green-500/90 hover:bg-green-500 text-white rounded-full shadow-lg backdrop-blur-sm transition-all duration-300 ease-in-out flex items-center justify-center group ${showBackToTop
+          className={`fixed bottom-20 md:bottom-6 right-6 z-500 w-12 h-12 bg-green-500/90 hover:bg-green-500 text-white rounded-full shadow-lg backdrop-blur-sm transition-all duration-300 ease-in-out flex items-center justify-center group ${showBackToTop
             ? 'opacity-100 translate-y-0 pointer-events-auto'
             : 'opacity-0 translate-y-4 pointer-events-none'
             }`}
@@ -2280,7 +2145,7 @@ const PlayStatsPage: React.FC = () => {
   // 加载中或错误状态
   return (
     <PageLayout activePath="/play-stats">
-      <div className='max-w-6xl mx-auto px-4 py-8'>
+      <div className='max-w-6xl mx-auto px-4 py-8 pb-40 md:pb-safe-bottom'>
         <div className='text-center py-12'>
           {error ? (
             <div className='text-red-600 dark:text-red-400'>{error}</div>
@@ -2295,7 +2160,7 @@ const PlayStatsPage: React.FC = () => {
       {/* 返回顶部悬浮按钮 */}
       <button
         onClick={scrollToTop}
-        className={`fixed bottom-20 md:bottom-6 right-6 z-[500] w-12 h-12 bg-green-500/90 hover:bg-green-500 text-white rounded-full shadow-lg backdrop-blur-sm transition-all duration-300 ease-in-out flex items-center justify-center group ${showBackToTop
+        className={`fixed bottom-20 md:bottom-6 right-6 z-500 w-12 h-12 bg-green-500/90 hover:bg-green-500 text-white rounded-full shadow-lg backdrop-blur-sm transition-all duration-300 ease-in-out flex items-center justify-center group ${showBackToTop
           ? 'opacity-100 translate-y-0 pointer-events-auto'
           : 'opacity-0 translate-y-4 pointer-events-none'
           }`}

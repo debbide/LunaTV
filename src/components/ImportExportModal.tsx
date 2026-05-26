@@ -26,6 +26,12 @@ interface ImportExportModalProps {
   ) => Promise<ImportResult>;
   onExport?: (format?: 'array' | 'config') => void;
   result?: ImportResult;
+  entityName?: string; // 实体名称，如"视频源"、"直播源"
+  arrayFormatDescription?: string; // 数组格式说明
+  configFormatDescription?: string; // 配置文件格式说明
+  configFormatExample?: string; // 配置文件格式示例
+  arrayFilenameHint?: string; // 数组格式文件名提示
+  configFilenameHint?: string; // 配置文件格式文件名提示
 }
 
 export default function ImportExportModal({
@@ -35,6 +41,12 @@ export default function ImportExportModal({
   onImport,
   onExport,
   result,
+  entityName = '数据',
+  arrayFormatDescription = '数组格式，适合批量导入',
+  configFormatDescription = '配置文件格式，可直接粘贴到配置文件中',
+  configFormatExample = '{"key": {...}}',
+  arrayFilenameHint = 'data_YYYYMMDD_HHMMSS.json',
+  configFilenameHint = 'config_YYYYMMDD_HHMMSS.json',
 }: ImportExportModalProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -93,18 +105,18 @@ export default function ImportExportModal({
   };
 
   const modalContent = (
-    <div className='fixed inset-0 bg-black/60 backdrop-blur-sm z-[9999] flex items-center justify-center p-4'>
+    <div className='fixed inset-0 bg-black/60 backdrop-blur-sm z-9999 flex items-center justify-center p-4'>
       <div className='bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-xl w-full max-h-[90vh] flex flex-col overflow-hidden'>
         {/* 头部 - 更紧凑的设计 */}
         <div
           className={`relative px-5 py-4 ${
             mode === 'import'
-              ? 'bg-gradient-to-r from-blue-600 to-cyan-600'
+              ? 'bg-linear-to-r from-blue-600 to-cyan-600'
               : mode === 'export'
-              ? 'bg-gradient-to-r from-green-600 to-emerald-600'
+              ? 'bg-linear-to-r from-green-600 to-emerald-600'
               : result && result.failed > 0
-              ? 'bg-gradient-to-r from-yellow-600 to-orange-600'
-              : 'bg-gradient-to-r from-green-600 to-emerald-600'
+              ? 'bg-linear-to-r from-yellow-600 to-orange-600'
+              : 'bg-linear-to-r from-green-600 to-emerald-600'
           }`}
         >
           <div className='flex items-center justify-between'>
@@ -119,9 +131,9 @@ export default function ImportExportModal({
               <div>
                 <h2 className='text-lg font-bold text-white'>
                   {mode === 'import'
-                    ? '导入视频源'
+                    ? `导入${entityName}`
                     : mode === 'export'
-                    ? '导出视频源'
+                    ? `导出${entityName}`
                     : '导入结果'}
                 </h2>
                 <p className='text-white/80 text-xs mt-0.5'>
@@ -279,7 +291,7 @@ export default function ImportExportModal({
                         数组格式（推荐）
                       </div>
                       <div className='text-xs text-blue-700 dark:text-blue-300 mt-0.5'>
-                        适用于批量导入功能，结构：<code className='bg-blue-100 dark:bg-blue-900/40 px-1 py-0.5 rounded'>[&#123;...&#125;]</code>
+                        {arrayFormatDescription}
                       </div>
                     </div>
                   </label>
@@ -299,7 +311,7 @@ export default function ImportExportModal({
                         配置文件格式
                       </div>
                       <div className='text-xs text-blue-700 dark:text-blue-300 mt-0.5'>
-                        适用于直接插入配置文件，结构：<code className='bg-blue-100 dark:bg-blue-900/40 px-1 py-0.5 rounded'>&#123;api_site: &#123;key: &#123;...&#125;&#125;&#125;</code>
+                        {configFormatDescription}，结构：<code className='bg-blue-100 dark:bg-blue-900/40 px-1 py-0.5 rounded'>{configFormatExample}</code>
                       </div>
                     </div>
                   </label>
@@ -311,9 +323,9 @@ export default function ImportExportModal({
                   📦 导出内容
                 </h4>
                 <ul className='text-xs text-green-800 dark:text-green-300 space-y-0.5'>
-                  <li>• 视频源配置将导出为 JSON 格式</li>
-                  <li>• 文件名：{exportFormat === 'array' ? 'video_sources' : 'config'}_YYYYMMDD_HHMMSS.json</li>
-                  <li>• 包含所有视频源的完整配置信息</li>
+                  <li>• {entityName}配置将导出为 JSON 格式</li>
+                  <li>• 文件名：{exportFormat === 'array' ? arrayFilenameHint : configFilenameHint}</li>
+                  <li>• 包含所有{entityName}的完整配置信息</li>
                   <li>• 可用于备份或迁移到其他设备</li>
                 </ul>
               </div>
@@ -365,10 +377,10 @@ export default function ImportExportModal({
                       }`}
                     >
                       {item.status === 'success' ? (
-                        <CheckCircle className='w-4 h-4 text-green-600 dark:text-green-400 flex-shrink-0 mt-0.5' />
+                        <CheckCircle className='w-4 h-4 text-green-600 dark:text-green-400 shrink-0 mt-0.5' />
                       ) : (
                         <AlertCircle
-                          className={`w-4 h-4 flex-shrink-0 mt-0.5 ${
+                          className={`w-4 h-4 shrink-0 mt-0.5 ${
                             item.status === 'skipped'
                               ? 'text-yellow-600 dark:text-yellow-400'
                               : 'text-red-600 dark:text-red-400'
@@ -399,11 +411,11 @@ export default function ImportExportModal({
         </div>
 
         {/* 底部按钮 - 更紧凑 */}
-        <div className='flex-shrink-0 px-5 py-3 bg-gray-50 dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 flex items-center justify-end space-x-2.5'>
+        <div className='shrink-0 px-5 py-3 bg-gray-50 dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 flex items-center justify-end space-x-2.5'>
           {mode === 'export' && (
             <button
               onClick={() => onExport?.(exportFormat)}
-              className='px-4 py-2 text-sm bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-lg hover:from-green-700 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg font-medium'
+              className='px-4 py-2 text-sm bg-linear-to-r from-green-600 to-emerald-600 text-white rounded-lg hover:from-green-700 hover:to-emerald-700 transition-all shadow-md hover:shadow-lg font-medium'
             >
               确认导出
             </button>

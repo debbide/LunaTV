@@ -5,16 +5,36 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
+import { recordRequest, getDbQueryCount, resetDbQueryCount } from '@/lib/performance-monitor';
 import { PlayRecord } from '@/lib/types';
 
 export const runtime = 'nodejs';
 
 export async function GET(request: NextRequest) {
+  const startTime = Date.now();
+  const startMemory = process.memoryUsage().heapUsed;
+  resetDbQueryCount();
+
   try {
     // 从 cookie 获取用户信息
     const authInfo = getAuthInfoFromCookie(request);
     if (!authInfo || !authInfo.username) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      const errorResponse = { error: 'Unauthorized' };
+      const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+      recordRequest({
+        timestamp: startTime,
+        method: 'GET',
+        path: '/api/playrecords',
+        statusCode: 401,
+        duration: Date.now() - startTime,
+        memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+        dbQueries: getDbQueryCount(),
+        requestSize: 0,
+        responseSize: errorSize,
+      });
+
+      return NextResponse.json(errorResponse, { status: 401 });
     }
 
     const config = await getConfig();
@@ -24,30 +44,122 @@ export async function GET(request: NextRequest) {
         (u) => u.username === authInfo.username
       );
       if (!user) {
-        return NextResponse.json({ error: '用户不存在' }, { status: 401 });
+        const errorResponse = { error: '用户不存在' };
+        const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+        recordRequest({
+          timestamp: startTime,
+          method: 'GET',
+          path: '/api/playrecords',
+          statusCode: 401,
+          duration: Date.now() - startTime,
+          memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+          dbQueries: getDbQueryCount(),
+          requestSize: 0,
+          responseSize: errorSize,
+        });
+
+        return NextResponse.json(errorResponse, { status: 401 });
       }
       if (user.banned) {
-        return NextResponse.json({ error: '用户已被封禁' }, { status: 401 });
+        const errorResponse = { error: '用户已被封禁' };
+        const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+        recordRequest({
+          timestamp: startTime,
+          method: 'GET',
+          path: '/api/playrecords',
+          statusCode: 401,
+          duration: Date.now() - startTime,
+          memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+          dbQueries: getDbQueryCount(),
+          requestSize: 0,
+          responseSize: errorSize,
+        });
+
+        return NextResponse.json(errorResponse, { status: 401 });
       }
     }
 
     const records = await db.getAllPlayRecords(authInfo.username);
-    return NextResponse.json(records, { status: 200 });
+
+    // 数据升级：确保旧播放记录包含新字段，防止前端崩溃
+    const upgradedRecords: Record<string, PlayRecord> = {};
+    for (const [key, record] of Object.entries(records)) {
+      upgradedRecords[key] = {
+        ...(record as PlayRecord),
+        // 确保 type 字段存在
+        type: (record as any).type || undefined,
+        // 确保 douban_id 字段存在
+        douban_id: (record as any).douban_id || undefined,
+        // 确保 remarks 字段存在
+        remarks: (record as any).remarks || undefined,
+        // 确保 original_episodes 字段存在
+        original_episodes: (record as any).original_episodes || undefined,
+      };
+    }
+
+    const responseSize = Buffer.byteLength(JSON.stringify(upgradedRecords), 'utf8');
+
+    recordRequest({
+      timestamp: startTime,
+      method: 'GET',
+      path: '/api/playrecords',
+      statusCode: 200,
+      duration: Date.now() - startTime,
+      memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+      dbQueries: getDbQueryCount(),
+      requestSize: 0,
+      responseSize,
+    });
+
+    return NextResponse.json(upgradedRecords, { status: 200 });
   } catch (err) {
     console.error('获取播放记录失败', err);
-    return NextResponse.json(
-      { error: 'Internal Server Error' },
-      { status: 500 }
-    );
+    const errorResponse = { error: 'Internal Server Error' };
+    const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+    recordRequest({
+      timestamp: startTime,
+      method: 'GET',
+      path: '/api/playrecords',
+      statusCode: 500,
+      duration: Date.now() - startTime,
+      memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+      dbQueries: getDbQueryCount(),
+      requestSize: 0,
+      responseSize: errorSize,
+    });
+
+    return NextResponse.json(errorResponse, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
+  const startTime = Date.now();
+  const startMemory = process.memoryUsage().heapUsed;
+  resetDbQueryCount();
+
   try {
     // 从 cookie 获取用户信息
     const authInfo = getAuthInfoFromCookie(request);
     if (!authInfo || !authInfo.username) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      const errorResponse = { error: 'Unauthorized' };
+      const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+      recordRequest({
+        timestamp: startTime,
+        method: 'POST',
+        path: '/api/playrecords',
+        statusCode: 401,
+        duration: Date.now() - startTime,
+        memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+        dbQueries: getDbQueryCount(),
+        requestSize: 0,
+        responseSize: errorSize,
+      });
+
+      return NextResponse.json(errorResponse, { status: 401 });
     }
 
     const config = await getConfig();
@@ -57,38 +169,105 @@ export async function POST(request: NextRequest) {
         (u) => u.username === authInfo.username
       );
       if (!user) {
-        return NextResponse.json({ error: '用户不存在' }, { status: 401 });
+        const errorResponse = { error: '用户不存在' };
+        const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+        recordRequest({
+          timestamp: startTime,
+          method: 'POST',
+          path: '/api/playrecords',
+          statusCode: 401,
+          duration: Date.now() - startTime,
+          memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+          dbQueries: getDbQueryCount(),
+          requestSize: 0,
+          responseSize: errorSize,
+        });
+
+        return NextResponse.json(errorResponse, { status: 401 });
       }
       if (user.banned) {
-        return NextResponse.json({ error: '用户已被封禁' }, { status: 401 });
+        const errorResponse = { error: '用户已被封禁' };
+        const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+        recordRequest({
+          timestamp: startTime,
+          method: 'POST',
+          path: '/api/playrecords',
+          statusCode: 401,
+          duration: Date.now() - startTime,
+          memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+          dbQueries: getDbQueryCount(),
+          requestSize: 0,
+          responseSize: errorSize,
+        });
+
+        return NextResponse.json(errorResponse, { status: 401 });
       }
     }
 
     const body = await request.json();
+    const requestSize = Buffer.byteLength(JSON.stringify(body), 'utf8');
     const { key, record }: { key: string; record: PlayRecord } = body;
 
     if (!key || !record) {
-      return NextResponse.json(
-        { error: 'Missing key or record' },
-        { status: 400 }
-      );
+      const errorResponse = { error: 'Missing key or record' };
+      const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+      recordRequest({
+        timestamp: startTime,
+        method: 'POST',
+        path: '/api/playrecords',
+        statusCode: 400,
+        duration: Date.now() - startTime,
+        memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+        dbQueries: getDbQueryCount(),
+        requestSize,
+        responseSize: errorSize,
+      });
+
+      return NextResponse.json(errorResponse, { status: 400 });
     }
 
     // 验证播放记录数据
     if (!record.title || !record.source_name || record.index < 1) {
-      return NextResponse.json(
-        { error: 'Invalid record data' },
-        { status: 400 }
-      );
+      const errorResponse = { error: 'Invalid record data' };
+      const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+      recordRequest({
+        timestamp: startTime,
+        method: 'POST',
+        path: '/api/playrecords',
+        statusCode: 400,
+        duration: Date.now() - startTime,
+        memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+        dbQueries: getDbQueryCount(),
+        requestSize,
+        responseSize: errorSize,
+      });
+
+      return NextResponse.json(errorResponse, { status: 400 });
     }
 
     // 从key中解析source和id
     const [source, id] = key.split('+');
     if (!source || !id) {
-      return NextResponse.json(
-        { error: 'Invalid key format' },
-        { status: 400 }
-      );
+      const errorResponse = { error: 'Invalid key format' };
+      const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+      recordRequest({
+        timestamp: startTime,
+        method: 'POST',
+        path: '/api/playrecords',
+        statusCode: 400,
+        duration: Date.now() - startTime,
+        memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+        dbQueries: getDbQueryCount(),
+        requestSize,
+        responseSize: errorSize,
+      });
+
+      return NextResponse.json(errorResponse, { status: 400 });
     }
 
     // 获取现有播放记录以保持原始集数
@@ -123,22 +302,68 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    return NextResponse.json({ success: true }, { status: 200 });
+    const successResponse = { success: true };
+    const responseSize = Buffer.byteLength(JSON.stringify(successResponse), 'utf8');
+
+    recordRequest({
+      timestamp: startTime,
+      method: 'POST',
+      path: '/api/playrecords',
+      statusCode: 200,
+      duration: Date.now() - startTime,
+      memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+      dbQueries: getDbQueryCount(),
+      requestSize,
+      responseSize,
+    });
+
+    return NextResponse.json(successResponse, { status: 200 });
   } catch (err) {
     console.error('保存播放记录失败', err);
-    return NextResponse.json(
-      { error: 'Internal Server Error' },
-      { status: 500 }
-    );
+    const errorResponse = { error: 'Internal Server Error' };
+    const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+    recordRequest({
+      timestamp: startTime,
+      method: 'POST',
+      path: '/api/playrecords',
+      statusCode: 500,
+      duration: Date.now() - startTime,
+      memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+      dbQueries: getDbQueryCount(),
+      requestSize: 0,
+      responseSize: errorSize,
+    });
+
+    return NextResponse.json(errorResponse, { status: 500 });
   }
 }
 
 export async function DELETE(request: NextRequest) {
+  const startTime = Date.now();
+  const startMemory = process.memoryUsage().heapUsed;
+  resetDbQueryCount();
+
   try {
     // 从 cookie 获取用户信息
     const authInfo = getAuthInfoFromCookie(request);
     if (!authInfo || !authInfo.username) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      const errorResponse = { error: 'Unauthorized' };
+      const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+      recordRequest({
+        timestamp: startTime,
+        method: 'DELETE',
+        path: '/api/playrecords',
+        statusCode: 401,
+        duration: Date.now() - startTime,
+        memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+        dbQueries: getDbQueryCount(),
+        requestSize: 0,
+        responseSize: errorSize,
+      });
+
+      return NextResponse.json(errorResponse, { status: 401 });
     }
 
     const config = await getConfig();
@@ -148,10 +373,40 @@ export async function DELETE(request: NextRequest) {
         (u) => u.username === authInfo.username
       );
       if (!user) {
-        return NextResponse.json({ error: '用户不存在' }, { status: 401 });
+        const errorResponse = { error: '用户不存在' };
+        const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+        recordRequest({
+          timestamp: startTime,
+          method: 'DELETE',
+          path: '/api/playrecords',
+          statusCode: 401,
+          duration: Date.now() - startTime,
+          memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+          dbQueries: getDbQueryCount(),
+          requestSize: 0,
+          responseSize: errorSize,
+        });
+
+        return NextResponse.json(errorResponse, { status: 401 });
       }
       if (user.banned) {
-        return NextResponse.json({ error: '用户已被封禁' }, { status: 401 });
+        const errorResponse = { error: '用户已被封禁' };
+        const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+        recordRequest({
+          timestamp: startTime,
+          method: 'DELETE',
+          path: '/api/playrecords',
+          statusCode: 401,
+          duration: Date.now() - startTime,
+          memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+          dbQueries: getDbQueryCount(),
+          requestSize: 0,
+          responseSize: errorSize,
+        });
+
+        return NextResponse.json(errorResponse, { status: 401 });
       }
     }
 
@@ -163,10 +418,22 @@ export async function DELETE(request: NextRequest) {
       // 如果提供了 key，删除单条播放记录
       const [source, id] = key.split('+');
       if (!source || !id) {
-        return NextResponse.json(
-          { error: 'Invalid key format' },
-          { status: 400 }
-        );
+        const errorResponse = { error: 'Invalid key format' };
+        const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+        recordRequest({
+          timestamp: startTime,
+          method: 'DELETE',
+          path: '/api/playrecords',
+          statusCode: 400,
+          duration: Date.now() - startTime,
+          memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+          dbQueries: getDbQueryCount(),
+          requestSize: 0,
+          responseSize: errorSize,
+        });
+
+        return NextResponse.json(errorResponse, { status: 400 });
       }
 
       await db.deletePlayRecord(username, source, id);
@@ -182,12 +449,39 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    return NextResponse.json({ success: true }, { status: 200 });
+    const successResponse = { success: true };
+    const responseSize = Buffer.byteLength(JSON.stringify(successResponse), 'utf8');
+
+    recordRequest({
+      timestamp: startTime,
+      method: 'DELETE',
+      path: '/api/playrecords',
+      statusCode: 200,
+      duration: Date.now() - startTime,
+      memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+      dbQueries: getDbQueryCount(),
+      requestSize: 0,
+      responseSize,
+    });
+
+    return NextResponse.json(successResponse, { status: 200 });
   } catch (err) {
     console.error('删除播放记录失败', err);
-    return NextResponse.json(
-      { error: 'Internal Server Error' },
-      { status: 500 }
-    );
+    const errorResponse = { error: 'Internal Server Error' };
+    const errorSize = Buffer.byteLength(JSON.stringify(errorResponse), 'utf8');
+
+    recordRequest({
+      timestamp: startTime,
+      method: 'DELETE',
+      path: '/api/playrecords',
+      statusCode: 500,
+      duration: Date.now() - startTime,
+      memoryUsed: (process.memoryUsage().heapUsed - startMemory) / 1024 / 1024,
+      dbQueries: getDbQueryCount(),
+      requestSize: 0,
+      responseSize: errorSize,
+    });
+
+    return NextResponse.json(errorResponse, { status: 500 });
   }
 }
