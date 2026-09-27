@@ -1,7 +1,8 @@
 'use client';
 
 import { useVirtualizer, type VirtualItem } from '@tanstack/react-virtual';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { DOMErrorBoundary } from './DOMErrorBoundary';
 
 interface VirtualGridProps<T> {
   items: T[];
@@ -87,6 +88,20 @@ export default function VirtualGrid<T>({
 }: VirtualGridProps<T>) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [columns, setColumns] = useState(3);
+  const [scrollMargin, setScrollMargin] = useState(0);
+
+  // Track parentRef's offsetTop so virtualizer knows where the container starts
+  // relative to the body scroll origin. Must update after every layout change
+  // (filters expanding/collapsing, responsive breakpoints, etc.).
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    if (!el) return;
+    const update = () => setScrollMargin(el.offsetTop);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(document.body);
+    return () => ro.disconnect();
+  }, []);
 
   // Detect column count from a hidden probe row that shares the same grid CSS
   const probeRef = useRef<HTMLDivElement>(null);
@@ -95,8 +110,8 @@ export default function VirtualGrid<T>({
     if (!probeRef.current) return;
     const style = window.getComputedStyle(probeRef.current);
     const cols = style.gridTemplateColumns.split(' ').length;
-    if (cols > 0 && cols !== columns) setColumns(cols);
-  }, [columns]);
+    if (cols > 0) setColumns(prev => (cols !== prev ? cols : prev));
+  }, []);
 
   useEffect(() => {
     detectColumns();
@@ -120,8 +135,10 @@ export default function VirtualGrid<T>({
     getScrollElement: () => document.body,
     estimateSize: () => estimateRowHeight,
     overscan,
+    scrollMargin,
     initialMeasurementsCache: initialSnapshot?.measurements,
     initialOffset: initialSnapshot?.scrollOffset,
+    useScrollendEvent: true,
   });
 
   const virtualRows = virtualizer.getVirtualItems();
@@ -138,11 +155,7 @@ export default function VirtualGrid<T>({
 
     const persist = () => {
       const v = virtualizerRef.current;
-      // takeSnapshot() is the 3.15+ API; fall back to measurementsCache if absent.
-      const measurements =
-        typeof v.takeSnapshot === 'function'
-          ? v.takeSnapshot()
-          : (v as unknown as { measurementsCache: VirtualItem[] }).measurementsCache;
+      const measurements = v.takeSnapshot();
       if (!measurements || measurements.length === 0) return;
 
       saveSnapshot(restoreKey, {
@@ -189,11 +202,12 @@ export default function VirtualGrid<T>({
   }, [virtualRows, rowCount, endReached, endReachedThreshold, estimateRowHeight]);
 
   return (
-    <>
+    <DOMErrorBoundary componentName="VirtualGrid">
       {/* Hidden probe element to measure column count from computed CSS grid */}
       <div
         ref={probeRef}
         aria-hidden
+        translate='no'
         className={`grid invisible h-0 overflow-hidden ${className}`}
       >
         <div />
@@ -201,6 +215,7 @@ export default function VirtualGrid<T>({
 
       <div
         ref={parentRef}
+        translate='no'
         style={{
           height: virtualizer.getTotalSize(),
           width: '100%',
@@ -209,12 +224,13 @@ export default function VirtualGrid<T>({
       >
         {/* Container with unified offset - official pattern */}
         <div
+          translate='no'
           style={{
             position: 'absolute',
             top: 0,
             left: 0,
             width: '100%',
-            transform: `translateY(${virtualRows[0]?.start ?? 0}px)`,
+            transform: `translateY(${(virtualRows[0]?.start ?? 0) - scrollMargin}px)`,
           }}
         >
           {virtualRows.map((virtualRow) => {
@@ -226,9 +242,10 @@ export default function VirtualGrid<T>({
                 key={virtualRow.key}
                 data-index={virtualRow.index}
                 ref={virtualizer.measureElement}
+                translate='no'
                 className={rowGapClass}
               >
-                <div className={`grid ${className}`}>
+                <div className={`grid ${className}`} translate='no'>
                   {rowItems.map((item, i) => (
                     <React.Fragment key={startIdx + i}>
                       {renderItem(item, startIdx + i)}
@@ -240,6 +257,6 @@ export default function VirtualGrid<T>({
           })}
         </div>
       </div>
-    </>
+    </DOMErrorBoundary>
   );
 }

@@ -1,6 +1,7 @@
 /* eslint-disable no-console,@typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from 'next/server';
 
+import { generateAuthCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
 
@@ -13,62 +14,80 @@ const STORAGE_TYPE =
     | 'redis'
     | 'upstash'
     | 'kvrocks'
+    | 'sqlite'
     | undefined) || 'localstorage';
 
-// 生成签名
-async function generateSignature(
-  data: string,
-  secret: string
-): Promise<string> {
-  const encoder = new TextEncoder();
-  const keyData = encoder.encode(secret);
-  const messageData = encoder.encode(data);
+// 登录暴力破解限流：同一 IP 在时间窗口内密码错误次数超限则直接拒绝，
+// 不等数据库/密码比较，避免 IP 被无限次尝试穷举密码。
+const LOGIN_RATE_LIMIT = 5;
+const LOGIN_RATE_WINDOW_MS = 30 * 60 * 1000; // 30 分钟
 
-  // 导入密钥
-  const key = await crypto.subtle.importKey(
-    'raw',
-    keyData,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
+function getClientIP(request: NextRequest): string {
+  const forwardedFor = request.headers.get('x-forwarded-for');
+  if (forwardedFor) {
+    return forwardedFor.split(',')[0].trim();
+  }
+  return (
+    request.headers.get('x-real-ip') ||
+    request.headers.get('cf-connecting-ip') ||
+    'unknown'
   );
-
-  // 生成签名
-  const signature = await crypto.subtle.sign('HMAC', key, messageData);
-
-  // 转换为十六进制字符串
-  return Array.from(new Uint8Array(signature))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
 }
 
-// 生成认证Cookie（带签名）
-async function generateAuthCookie(
-  username?: string,
-  password?: string,
-  role?: 'owner' | 'admin' | 'user',
-  includePassword = false
-): Promise<string> {
-  const authData: any = { role: role || 'user' };
+async function isLoginRateLimited(ip: string): Promise<boolean> {
+  // localstorage 模式没有持久化存储（db.storage 为 null），限流无处记录，直接跳过
+  if (STORAGE_TYPE === 'localstorage') return false;
 
-  // 只在需要时包含 password
-  if (includePassword && password) {
-    authData.password = password;
+  const key = `login-rate-limit:${ip}`;
+  try {
+    const currentCount = (await db.getCache(key)) || 0;
+    return currentCount >= LOGIN_RATE_LIMIT;
+  } catch (error) {
+    console.error('登录限流检查失败:', error);
+    // 数据库故障时不能因此锁死正常登录，fail-open
+    return false;
   }
-
-  if (username && process.env.PASSWORD) {
-    authData.username = username;
-    // 使用密码作为密钥对用户名进行签名
-    const signature = await generateSignature(username, process.env.PASSWORD);
-    authData.signature = signature;
-    authData.timestamp = Date.now(); // 添加时间戳防重放攻击
-    authData.loginTime = Date.now(); // 添加登入时间记录
-  }
-
-  return encodeURIComponent(JSON.stringify(authData));
 }
+
+async function recordLoginFailure(ip: string): Promise<void> {
+  if (STORAGE_TYPE === 'localstorage') return;
+
+  const key = `login-rate-limit:${ip}`;
+  try {
+    const currentCount = (await db.getCache(key)) || 0;
+    await db.setCache(key, currentCount + 1, Math.ceil(LOGIN_RATE_WINDOW_MS / 1000));
+  } catch (error) {
+    console.error('登录失败计数写入失败:', error);
+  }
+}
+
+// 判断当前请求是否走 HTTPS，用于决定 Cookie 的 Secure 属性
+// 仅在确定为 https 时才置为 true，http 部署保持原有行为，避免 Cookie 被浏览器丢弃
+function isHttpsRequest(req: NextRequest): boolean {
+  const forwardedProto = req.headers
+    .get('x-forwarded-proto')
+    ?.split(',')[0]
+    .trim()
+    .toLowerCase();
+  if (forwardedProto) {
+    return forwardedProto === 'https';
+  }
+  return req.nextUrl.protocol === 'https:';
+}
+
+// generateSignature / generateAuthCookie 统一使用 @/lib/auth 中的实现
+// （cookie 不存明文密码，改存 HMAC 哈希）
 
 export async function POST(req: NextRequest) {
+  const useSecureCookie = isHttpsRequest(req);
+  const clientIP = getClientIP(req);
+  if (await isLoginRateLimited(clientIP)) {
+    return NextResponse.json(
+      { error: '登录尝试次数过多，请 30 分钟后再试' },
+      { status: 429 }
+    );
+  }
+
   try {
     // 本地 / localStorage 模式——仅校验固定密码
     if (STORAGE_TYPE === 'localstorage') {
@@ -84,7 +103,7 @@ export async function POST(req: NextRequest) {
           expires: new Date(0),
           sameSite: 'lax', // 改为 lax 以支持 PWA
           httpOnly: false, // PWA 需要客户端可访问
-          secure: false, // 根据协议自动设置
+          secure: useSecureCookie, // 仅 HTTPS 下启用 Secure
         });
 
         return response;
@@ -96,6 +115,7 @@ export async function POST(req: NextRequest) {
       }
 
       if (password !== envPassword) {
+        await recordLoginFailure(clientIP);
         return NextResponse.json(
           { ok: false, error: '密码错误' },
           { status: 401 }
@@ -106,10 +126,10 @@ export async function POST(req: NextRequest) {
       const response = NextResponse.json({ ok: true });
       const cookieValue = await generateAuthCookie(
         undefined,
-        password,
         'user',
+        password,
         true
-      ); // localstorage 模式包含 password
+      ); // localstorage 模式包含 password 哈希（非明文）
       const expires = new Date();
       expires.setDate(expires.getDate() + 7); // 7天过期
 
@@ -118,7 +138,7 @@ export async function POST(req: NextRequest) {
         expires,
         sameSite: 'lax', // 改为 lax 以支持 PWA
         httpOnly: false, // PWA 需要客户端可访问
-        secure: false, // 根据协议自动设置
+        secure: useSecureCookie, // 仅 HTTPS 下启用 Secure
       });
 
       return response;
@@ -143,8 +163,8 @@ export async function POST(req: NextRequest) {
       const response = NextResponse.json({ ok: true });
       const cookieValue = await generateAuthCookie(
         username,
-        password,
         'owner',
+        password,
         false
       ); // 数据库模式不包含 password
       const expires = new Date();
@@ -155,11 +175,12 @@ export async function POST(req: NextRequest) {
         expires,
         sameSite: 'lax', // 改为 lax 以支持 PWA
         httpOnly: false, // PWA 需要客户端可访问
-        secure: false, // 根据协议自动设置
+        secure: useSecureCookie, // 仅 HTTPS 下启用 Secure
       });
 
       return response;
     } else if (username === process.env.USERNAME) {
+      await recordLoginFailure(clientIP);
       return NextResponse.json({ error: '用户名或密码错误' }, { status: 401 });
     }
 
@@ -174,6 +195,7 @@ export async function POST(req: NextRequest) {
       const pass = await db.verifyUser(username, password);
 
       if (!pass) {
+        await recordLoginFailure(clientIP);
         return NextResponse.json(
           { error: '用户名或密码错误' },
           { status: 401 }
@@ -184,8 +206,8 @@ export async function POST(req: NextRequest) {
       const response = NextResponse.json({ ok: true });
       const cookieValue = await generateAuthCookie(
         username,
-        password,
         user?.role || 'user',
+        password,
         false
       );
       const expires = new Date();
@@ -196,7 +218,7 @@ export async function POST(req: NextRequest) {
         expires,
         sameSite: 'lax',
         httpOnly: false,
-        secure: false,
+        secure: useSecureCookie,
       });
 
       return response;

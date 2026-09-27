@@ -2,7 +2,11 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-import { getAuthInfoFromCookie } from '@/lib/auth';
+import {
+  getAuthInfoFromCookie,
+  getLocalPasswordHash,
+  verifyLocalPasswordHash,
+} from '@/lib/auth';
 
 // 信任网络配置缓存（从 API 获取）
 let trustedNetworkCache: { enabled: boolean; trustedIPs: string[]; blockAdminAccess: boolean } | null = null;
@@ -105,6 +109,25 @@ async function getTrustedNetworkConfig(request: NextRequest): Promise<{ enabled:
   return await getTrustedNetworkFromAPI(request);
 }
 
+// 常见弱默认密码/凭据黑名单（小写比对）。命中时视同未配置密码，
+// 强制走 /warning 页而不是静默放行——这类值通常来自教程截图、示例配置复制粘贴。
+const WEAK_DEFAULT_CREDENTIALS = new Set([
+  'admin',
+  'admin123',
+  'password',
+  'password123',
+  '123456',
+  '12345678',
+  'changeme',
+  'letmein',
+  'lunatv',
+  'moontv',
+]);
+
+function isWeakDefaultCredential(value: string): boolean {
+  return WEAK_DEFAULT_CREDENTIALS.has(value.toLowerCase());
+}
+
 // 获取客户端 IP
 function getClientIP(request: NextRequest): string {
   // 按优先级获取客户端 IP
@@ -173,16 +196,16 @@ function isIPTrusted(clientIP: string, trustedIPs: string[]): boolean {
 }
 
 // 生成信任网络的自动登录 cookie
-function generateTrustedAuthCookie(request: NextRequest): NextResponse {
+async function generateTrustedAuthCookie(request: NextRequest): Promise<NextResponse> {
   const response = NextResponse.next();
 
   const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
   const username = process.env.USERNAME || 'admin';
 
   if (storageType === 'localstorage') {
-    // localstorage 模式：设置密码 cookie
+    // localstorage 模式：设置密码哈希 cookie（不存明文）
     const authInfo = {
-      password: process.env.PASSWORD,
+      password: await getLocalPasswordHash(),
       loginTime: Date.now(),
     };
     response.cookies.set('user_auth', JSON.stringify(authInfo), {
@@ -282,7 +305,7 @@ async function handleAuthentication(
         }
 
         // 没有认证 cookie，自动生成并设置
-        return generateTrustedAuthCookie(request);
+        return await generateTrustedAuthCookie(request);
       }
     }
   }
@@ -290,8 +313,16 @@ async function handleAuthentication(
   const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
 
   if (!process.env.PASSWORD) {
-    // 如果没有设置密码，重定向到警告页面
+    // 未设置密码，重定向到警告页面
     const warningUrl = new URL('/warning', request.url);
+    return NextResponse.redirect(warningUrl);
+  }
+
+  if (isWeakDefaultCredential(process.env.PASSWORD)) {
+    // 已设置密码，但命中常见弱默认值黑名单（admin/admin123/password等）——
+    // 用不同的 reason 参数区分，避免用户误以为环境变量没生效
+    const warningUrl = new URL('/warning', request.url);
+    warningUrl.searchParams.set('reason', 'weak-password');
     return NextResponse.redirect(warningUrl);
   }
 
@@ -304,7 +335,7 @@ async function handleAuthentication(
 
   // localstorage模式：在middleware中完成验证
   if (storageType === 'localstorage') {
-    if (!authInfo.password || authInfo.password !== process.env.PASSWORD) {
+    if (!authInfo.password || !(await verifyLocalPasswordHash(authInfo.password))) {
       return handleAuthFailure(request, pathname);
     }
     return response || NextResponse.next();

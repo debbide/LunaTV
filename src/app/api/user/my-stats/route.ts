@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { after, NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
@@ -207,6 +207,58 @@ export async function POST(request: NextRequest) {
   }
 }
 
+// 从请求头获取真实客户端 IP
+function getClientIp(request: NextRequest): string {
+  const cfIp = request.headers.get('cf-connecting-ip');
+  if (cfIp) return cfIp;
+  const forwarded = request.headers.get('x-forwarded-for');
+  if (forwarded) return forwarded.split(',')[0].trim();
+  return request.headers.get('x-real-ip') || 'unknown';
+}
+
+// 解析 User-Agent 获取设备/浏览器/OS 信息
+function parseUserAgent(ua: string): { device: string; browser: string; os: string } {
+  const isTablet = /iPad|Tablet/i.test(ua);
+  const isMobile = /Mobile|Android|iPhone/i.test(ua);
+  const device = isTablet ? 'tablet' : isMobile ? 'mobile' : 'desktop';
+
+  const browser = /Edg/.test(ua) ? 'Edge'
+    : /Chrome/.test(ua) ? 'Chrome'
+    : /Firefox/.test(ua) ? 'Firefox'
+    : /Safari/.test(ua) ? 'Safari'
+    : 'Other';
+
+  const os = /Windows/.test(ua) ? 'Windows'
+    : /Mac/.test(ua) ? 'macOS'
+    : /Android/.test(ua) ? 'Android'
+    : /iPhone|iPad/.test(ua) ? 'iOS'
+    : /Linux/.test(ua) ? 'Linux'
+    : 'Other';
+
+  return { device, browser, os };
+}
+
+// 查询 IP 归属地（ip-api.com，免费，无需 key，45次/分钟）
+async function getIpLocation(ip: string): Promise<string> {
+  try {
+    if (ip === 'unknown' || ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.')) {
+      return '本地网络';
+    }
+    const res = await fetch(`http://ip-api.com/json/${ip}?lang=zh-CN&fields=status,country,regionName,city`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return '';
+    const data = await res.json();
+    if (data.status !== 'success') return '';
+    const parts = [data.country, data.regionName, data.city].filter(Boolean);
+    // 去重相邻重复（如"中国 广东 广东"）
+    const deduped = parts.filter((v, i) => i === 0 || v !== parts[i - 1]);
+    return deduped.join(' ');
+  } catch {
+    return '';
+  }
+}
+
 // PUT 方法：记录用户登入时间
 export async function PUT(request: NextRequest) {
   try {
@@ -255,39 +307,41 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    // 获取当前用户统计数据
+    // 收集 IP 和设备信息（地理位置查询较慢，不阻塞响应）
+    const ip = getClientIp(request);
+    const ua = request.headers.get('user-agent') || '';
+    const { device, browser, os } = parseUserAgent(ua);
+
+    // 获取当前用户统计数据（用于立即返回 loginCount，实际计数仍由 updateUserLoginStats 落库）
     const currentStats = await db.getUserPlayStat(authInfo.username);
+    const nextLoginCount = (currentStats.loginCount || 0) + 1;
 
-    // 更新登入时间相关统计
-    const updatedStats = {
-      ...currentStats,
-      lastLoginTime: loginTime, // 最后登入时间
-      lastLoginDate: loginTime, // 保持兼容性
-      // 如果是首次登入，记录首次登入时间
-      firstLoginTime: currentStats.firstLoginTime || currentStats.lastLoginDate || loginTime,
-      // 更新登入次数
-      loginCount: (currentStats.loginCount || 0) + 1,
-      lastUpdateTime: loginTime
-    };
-
-    // 保存登入统计到数据库
-    try {
-      await db.updateUserLoginStats(authInfo.username, loginTime, updatedStats.loginCount === 1);
-      console.log('用户登入统计已保存到数据库:', {
-        username: authInfo.username,
-        loginTime,
-        isFirstLogin: updatedStats.loginCount === 1
-      });
-    } catch (saveError) {
-      console.error('保存登入统计失败:', saveError);
-      // 即使保存失败也返回成功，因为登录本身是成功的
-    }
+    // 响应返回后再查地理位置、写数据库，避免登录跳转被外部 API 拖慢
+    after(async () => {
+      try {
+        const location = await getIpLocation(ip);
+        const loginMeta = { ip, location, device, browser, os };
+        await db.updateUserLoginStats(authInfo.username, loginTime, nextLoginCount === 1, loginMeta);
+        console.log('用户登入统计已保存到数据库:', {
+          username: authInfo.username,
+          loginTime,
+          ip,
+          location,
+          device,
+          isFirstLogin: nextLoginCount === 1
+        });
+      } catch (saveError) {
+        console.error('保存登入统计失败:', saveError);
+      }
+    });
 
     return NextResponse.json({
       success: true,
       message: '登入时间记录成功',
       loginTime,
-      loginCount: updatedStats.loginCount
+      loginCount: nextLoginCount,
+      ip,
+      device,
     });
   } catch (error) {
     console.error('PUT /api/user/my-stats - 记录登入时间失败:', error);

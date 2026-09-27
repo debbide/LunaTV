@@ -9,6 +9,7 @@ import { Heart, Menu, Radio, RefreshCw, Search, Tv, X, ChevronDown, ChevronUp } 
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Tabs, Tab, Box } from '@mui/material';
 
+import OptimizedHlsLoader from '@/lib/hls-loader';
 import {
   debounce,
 } from '@/lib/channel-search';
@@ -1151,17 +1152,18 @@ function LivePageClient() {
                   target.style.display = 'none';
                   const parent = target.parentElement;
                   if (parent && !parent.querySelector('.fallback-icon')) {
-                    parent.innerHTML = `
-                      <div class="fallback-icon relative w-full h-full flex items-center justify-center">
-                        <svg class="w-5 h-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z" />
-                        </svg>
-                        <span class="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
-                          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                          <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
-                        </span>
-                      </div>
+                    const fallback = document.createElement('div');
+                    fallback.className = 'fallback-icon relative w-full h-full flex items-center justify-center';
+                    fallback.innerHTML = `
+                      <svg class="w-5 h-5 text-red-500" fill="currentColor" viewBox="0 0 20 20">
+                        <path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z" />
+                      </svg>
+                      <span class="absolute -top-0.5 -right-0.5 flex h-2.5 w-2.5">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500"></span>
+                      </span>
                     `;
+                    parent.appendChild(fallback);
                   }
                 }}
               />
@@ -1170,28 +1172,31 @@ function LivePageClient() {
             )}
           </div>
           <div className='flex-1 min-w-0'>
-            <div
-              className='flex items-center gap-1 cursor-pointer select-none group'
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleChannelNameExpanded(channel.id);
-              }}
-            >
+            <div className='flex items-center gap-1'>
               <div className='flex-1 min-w-0'>
                 <div className={`text-sm font-medium text-gray-900 dark:text-gray-100 ${expandedChannels.has(channel.id) ? '' : 'line-clamp-1 md:line-clamp-2'}`}>
                   {channel.name}
                 </div>
               </div>
-              <div className='shrink-0 flex items-center gap-1'>
+              <button
+                type='button'
+                className='shrink-0 flex items-center gap-1 p-1 -mr-1 rounded hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors'
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleChannelNameExpanded(channel.id);
+                }}
+                aria-expanded={expandedChannels.has(channel.id)}
+                aria-label={expandedChannels.has(channel.id) ? '收起' : '展开'}
+              >
                 {expandedChannels.has(channel.id) ? (
                   <ChevronUp className='w-4 h-4 text-blue-500 dark:text-blue-400 transition-transform duration-300' />
                 ) : (
-                  <ChevronDown className='w-4 h-4 text-gray-400 dark:text-gray-500 group-hover:text-blue-500 dark:group-hover:text-blue-400 transition-all duration-300' />
+                  <ChevronDown className='w-4 h-4 text-gray-400 dark:text-gray-500 hover:text-blue-500 dark:hover:text-blue-400 transition-all duration-300' />
                 )}
                 <span className='hidden md:inline text-xs text-blue-500 dark:text-blue-400'>
                   {expandedChannels.has(channel.id) ? '收起' : '展开'}
                 </span>
-              </div>
+              </button>
             </div>
             <div className='mt-1 flex items-center gap-1.5 flex-wrap'>
               <span className='text-xs text-gray-500 dark:text-gray-400 truncate' title={channel.group}>
@@ -1640,44 +1645,6 @@ function LivePageClient() {
     }
   }, [selectedGroup, groupedChannels]);
 
-  class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
-    constructor(config: any) {
-      super(config);
-      const load = this.load.bind(this);
-      this.load = function (context: any, config: any, callbacks: any) {
-        // 所有的请求都带一个 source 参数
-        try {
-          const url = new URL(context.url);
-          url.searchParams.set('moontv-source', currentSourceRef.current?.key || '');
-          context.url = url.toString();
-        } catch (error) {
-          // ignore
-        }
-        // 拦截manifest和level请求
-        if (
-          (context as any).type === 'manifest' ||
-          (context as any).type === 'level'
-        ) {
-          // 判断是否浏览器直连
-          const isLiveDirectConnectStr = localStorage.getItem('liveDirectConnect');
-          const isLiveDirectConnect = isLiveDirectConnectStr === 'true';
-          if (isLiveDirectConnect) {
-            // 浏览器直连，使用 URL 对象处理参数
-            try {
-              const url = new URL(context.url);
-              url.searchParams.set('allowCORS', 'true');
-              context.url = url.toString();
-            } catch (error) {
-              // 如果 URL 解析失败，回退到字符串拼接
-              context.url = context.url + '&allowCORS=true';
-            }
-          }
-        }
-        // 执行原始load方法
-        load(context, config, callbacks);
-      };
-    }
-  }
 
   // 错误重试状态管理
   let keyLoadErrorCount = 0;
@@ -1749,7 +1716,12 @@ function LivePageClient() {
       
       // 浏览器特殊优化
       liveDurationInfinity: false, // 源码默认，Safari兼容
-      
+
+      // v1.7.0 新增：直播源连续 N 次刷新播放列表无变化时判定为假死，抛出 PLAYLIST_UNCHANGED_ERROR，避免无限轮询死频道
+      liveMaxUnchangedPlaylistRefresh: 5,
+      // v1.7.0 新增：appendBuffer 卡死超时兜底，避免播放静默卡住不报错
+      appendTimeout: 10000,
+
       // 移动设备网络优化 - 使用新的LoadPolicy配置
       ...(isMobile && {
         // 使用 fragLoadPolicy 替代旧的配置方式
@@ -1772,8 +1744,18 @@ function LivePageClient() {
           }
         }
       }),
-      
-      loader: CustomHlsJsLoader,
+
+      /* 优化的 HLS Loader：直连模式 + 源标识 + 并发分片预取 */
+      loader: class extends OptimizedHlsLoader {
+        constructor(config: any) {
+          super({
+            ...config,
+            filterAds: false,
+            enableDirectConnect: localStorage.getItem('liveDirectConnect') === 'true',
+            sourceKey: currentSourceRef.current?.key || '',
+          });
+        }
+      },
     };
 
     const hls = new Hls(hlsConfig);
@@ -1853,6 +1835,15 @@ function LivePageClient() {
       if (data.details === Hls.ErrorDetails.BUFFER_INCOMPATIBLE_CODECS_ERROR) {
         console.error('Incompatible codecs error - fatal');
         setUnsupportedType('codec-incompatible');
+        setIsVideoLoading(false);
+        hls.destroy();
+        return;
+      }
+
+      // v1.7.0 新增：直播源连续多次刷新内容无变化（假死），hls.js 已耗尽内部重试预算，主动判定为不可用
+      if (data.details === Hls.ErrorDetails.PLAYLIST_UNCHANGED_ERROR) {
+        console.error('直播源假死（播放列表连续无变化），判定为不可用');
+        setUnsupportedType('channel-unavailable');
         setIsVideoLoading(false);
         hls.destroy();
         return;
@@ -2168,6 +2159,7 @@ function LivePageClient() {
         artPlayerRef.current.on('ready', () => {
           setError(null);
           setIsVideoLoading(false);
+          setUnsupportedType(null);
 
           // 延迟检测是否支持 DVR/时移回放（仅在未启用DVR模式时检测）
           if (!enableDvrMode) {

@@ -57,6 +57,12 @@ export const API_CONFIG = {
 
 // 在模块加载时根据环境决定配置来源
 let cachedConfig: AdminConfig;
+// 缓存写入时间：超过 TTL 后重新读库，
+// 使多实例部署下另一实例修改的配置（封禁、换源、公告等）能自动生效
+let cachedConfigAt = 0;
+// 正在进行中的读取，避免冷启动时并发请求同时打库
+let pendingConfig: Promise<AdminConfig> | null = null;
+const CONFIG_TTL_MS = 5 * 60 * 1000;
 
 
 // 从配置文件补充管理员配置
@@ -211,7 +217,7 @@ async function getInitConfig(configFile: string, subConfig: {
   AutoUpdate: boolean;
   LastCheck: string;
 } = {
-    URL: "",
+    URL: process.env.NEXT_PUBLIC_SUB_URL || "",
     AutoUpdate: false,
     LastCheck: "",
   }): Promise<AdminConfig> {
@@ -238,6 +244,10 @@ async function getInitConfig(configFile: string, subConfig: {
       DoubanImageProxyType:
         process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY_TYPE || 'server',
       DoubanImageProxy: process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY || '',
+      BangumiApiType: process.env.NEXT_PUBLIC_BANGUMI_API_TYPE || 'cmliussss',
+      BangumiApiProxy: process.env.NEXT_PUBLIC_BANGUMI_API_PROXY || '',
+      BangumiImageProxyType: process.env.NEXT_PUBLIC_BANGUMI_IMAGE_PROXY_TYPE || 'cmliussss',
+      BangumiImageProxy: process.env.NEXT_PUBLIC_BANGUMI_IMAGE_PROXY || '',
       DisableYellowFilter:
         process.env.NEXT_PUBLIC_DISABLE_YELLOW_FILTER === 'true',
       ShowAdultContent: false, // 默认不显示成人内容，可在管理面板修改
@@ -256,6 +266,14 @@ async function getInitConfig(configFile: string, subConfig: {
     SourceConfig: [],
     CustomCategories: [],
     LiveConfig: [],
+    TVBoxProxyConfig: {
+      enabled: false,
+      proxyUrl: process.env.NEXT_PUBLIC_CORSAPI_URL || 'https://corsapi.smone.workers.dev',
+    },
+    VideoProxyConfig: {
+      enabled: false,
+      proxyUrl: process.env.NEXT_PUBLIC_CORSAPI_URL || 'https://corsapi.smone.workers.dev',
+    },
   };
 
   // 补充用户信息
@@ -322,31 +340,52 @@ async function getInitConfig(configFile: string, subConfig: {
 }
 
 export async function getConfig(): Promise<AdminConfig> {
-  // 🔥 防止 Next.js 在 Docker 环境下缓存配置（解决站点名称更新问题）
-  unstable_noStore();
-
-  // 🔥 完全移除内存缓存检查 - Docker 环境下模块级变量不会被清除
-  // 参考：https://nextjs.org/docs/app/guides/memory-usage
-  // 每次都从数据库读取最新配置，确保动态配置立即生效
-
-  // 读 db
-  let adminConfig: AdminConfig | null = null;
-  try {
-    adminConfig = await db.getAdminConfig();
-  } catch (e) {
-    console.error('获取管理员配置失败:', e);
+  // 命中未过期的内存缓存
+  if (cachedConfig && Date.now() - cachedConfigAt < CONFIG_TTL_MS) {
+    return cachedConfig;
   }
 
-  // db 中无配置，执行一次初始化
-  if (!adminConfig) {
-    adminConfig = await getInitConfig("");
+  // 已有在途读取则复用，避免并发重复打库
+  if (pendingConfig) {
+    return pendingConfig;
   }
-  adminConfig = await configSelfCheck(adminConfig);
 
-  // 🔥 仍然更新 cachedConfig 以保持向后兼容，但不再依赖它
-  cachedConfig = adminConfig;
+  pendingConfig = (async () => {
+    // 读 db
+    let adminConfig: AdminConfig | null = null;
+    try {
+      adminConfig = await db.getAdminConfig();
+    } catch (e) {
+      console.error('获取管理员配置失败:', e);
+      // 读库失败时回退到旧缓存，避免整站不可用
+      if (cachedConfig) {
+        cachedConfigAt = Date.now();
+        return cachedConfig;
+      }
+    }
 
-  return adminConfig;
+    // db 中无配置，执行一次初始化
+    const needInit = !adminConfig;
+    if (!adminConfig) {
+      adminConfig = await getInitConfig("");
+    }
+    adminConfig = await configSelfCheck(adminConfig);
+    cachedConfig = adminConfig;
+    cachedConfigAt = Date.now();
+    // 仅在首次初始化时回写，避免每次缓存过期都产生一次写库
+    if (needInit) {
+      try {
+        await db.saveAdminConfig(cachedConfig);
+      } catch (e) {
+        console.error('保存管理员配置失败:', e);
+      }
+    }
+    return cachedConfig;
+  })().finally(() => {
+    pendingConfig = null;
+  });
+
+  return pendingConfig;
 }
 
 // 清除配置缓存，强制重新从数据库读取
@@ -452,7 +491,10 @@ export async function configSelfCheck(adminConfig: AdminConfig): Promise<AdminCo
       enabled: true,                                    // 默认启用
       pansouUrl: 'https://so.252035.xyz',               // 默认公益服务
       timeout: 30,                                      // 默认30秒超时
-      enabledCloudTypes: ['baidu', 'aliyun', 'quark'] // 默认只启用百度、阿里、夸克三大主流网盘
+      enabledCloudTypes: ['baidu', 'aliyun', 'quark'], // 默认只启用百度、阿里、夸克三大主流网盘
+      token: '',
+      username: '',
+      password: '',
     };
   }
 
@@ -483,7 +525,7 @@ export async function configSelfCheck(adminConfig: AdminConfig): Promise<AdminCo
   // 确保短剧配置有默认值
   if (!adminConfig.ShortDramaConfig) {
     adminConfig.ShortDramaConfig = {
-      primaryApiUrl: 'https://wwzy.tv/api.php/provide/vod',  // 默认主API
+      primaryApiUrl: 'https://tyyszyapi.com/api.php/provide/vod',  // 默认主API
       alternativeApiUrl: '',                            // 默认为空，需要管理员配置
       enableAlternative: false,                         // 默认关闭备用API
     };
@@ -635,6 +677,7 @@ export async function resetConfig() {
   }
   const adminConfig = await getInitConfig(originConfig.ConfigFile, originConfig.ConfigSubscribtion);
   cachedConfig = adminConfig;
+  cachedConfigAt = Date.now();
   await db.saveAdminConfig(adminConfig);
 
   return;
@@ -792,6 +835,7 @@ export async function getAvailableApiSites(user?: string): Promise<ApiSite[]> {
 
 export async function setCachedConfig(config: AdminConfig) {
   cachedConfig = config;
+  cachedConfigAt = Date.now();
 }
 
 // 特殊功能权限检查

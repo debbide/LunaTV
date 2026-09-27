@@ -66,6 +66,16 @@ function VersionDisplay() {
   );
 }
 
+// 仅允许跳回站内地址，避免 ?redirect= 被用作开放重定向
+function sanitizeRedirect(target: string | null): string {
+  if (!target) return '/';
+  // 必须是以单个 / 开头的站内路径（排除 //evil.com 与 /\\evil.com 这类协议相对地址）
+  if (!target.startsWith('/') || target.startsWith('//') || target.startsWith('/\\')) {
+    return '/';
+  }
+  return target;
+}
+
 function LoginPageClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -187,13 +197,11 @@ function LoginPageClient() {
           // 登入时间记录失败不影响正常登录流程
         }
 
-        const redirect = searchParams.get('redirect') || '/';
+        const redirect = sanitizeRedirect(searchParams.get('redirect'));
         router.replace(redirect);
-      } else if (res.status === 401) {
-        setError('密码错误');
       } else {
         const data = await res.json().catch(() => ({}));
-        setError(data.error ?? '服务器错误');
+        setError(data.error ?? (res.status === 401 ? '密码错误' : '服务器错误'));
       }
     } catch (error) {
       setError('网络错误，请稍后重试');
@@ -244,7 +252,7 @@ function LoginPageClient() {
 
 
   return (
-    <div className='fixed inset-0 z-50 flex items-center justify-center px-3 sm:px-4 py-8 sm:py-0 overflow-hidden bg-gradient-to-br from-purple-100 via-blue-50 to-pink-100 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900'>
+    <div translate="no" className='fixed inset-0 z-50 flex items-center justify-center px-3 sm:px-4 py-8 sm:py-0 overflow-hidden bg-gradient-to-br from-purple-100 via-blue-50 to-pink-100 dark:from-gray-900 dark:via-gray-800 dark:to-gray-900'>
       {/* Bing 每日壁纸背景 */}
       {bingWallpaper && (
         <div
@@ -332,7 +340,7 @@ function LoginPageClient() {
           </div>
 
           {error && (
-            <div className='flex items-center gap-2 p-2.5 sm:p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50 animate-slide-down'>
+            <div role='alert' className='flex items-center gap-2 p-2.5 sm:p-3 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50 animate-shake-in'>
               <AlertCircle className='h-4 w-4 text-red-600 dark:text-red-400 shrink-0' />
               <p className='text-xs sm:text-sm text-red-600 dark:text-red-400'>{error}</p>
             </div>
