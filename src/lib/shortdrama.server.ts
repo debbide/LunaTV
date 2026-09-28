@@ -1,52 +1,21 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, no-console */
 
 import { getConfig } from './config';
-import { DEFAULT_USER_AGENT } from './user-agent';
+import { shortDramaFetch } from './shortdrama-fetch';
 import { ShortDramaItem } from './types';
 
 // 短剧相关分类关键词（父分类 + 子分类标签）
 const SHORT_DRAMA_KEYWORDS = ['短剧', '女频恋爱', '反转爽剧', '古装仙侠', '年代穿越', '脑洞悬疑', '现代都市'];
-
-// 获取代理 dispatcher（用于 fetch 走代理）
-async function getProxyDispatcher(): Promise<any | undefined> {
-  try {
-    const config = await getConfig();
-    const proxyUrl = (config.ShortDramaConfig as any)?.proxyUrl
-      || process.env.SHORTDRAMA_PROXY
-      || process.env.HTTPS_PROXY
-      || process.env.HTTP_PROXY;
-    if (proxyUrl) {
-      // 动态 import，避免无代理时加载 undici
-      const { ProxyAgent } = await import('undici');
-      return new ProxyAgent(proxyUrl);
-    }
-  } catch {
-    // 忽略代理配置错误，降级为直连
-  }
-  return undefined;
-}
 
 // 从单个短剧源获取数据（通过分类名称查找）
 async function fetchFromShortDramaSource(
   api: string,
   size: number
 ): Promise<ShortDramaItem[]> {
-  const dispatcher = await getProxyDispatcher();
-  const fetchOpts: any = {
-    headers: {
-      'User-Agent': DEFAULT_USER_AGENT,
-      'Accept': 'application/json',
-    },
-    signal: AbortSignal.timeout(10000),
-  };
-  if (dispatcher) {
-    fetchOpts.dispatcher = dispatcher;
-  }
-
   // Step 1: 获取分类列表，找到短剧相关分类的ID
   const listUrl = `${api}?ac=list`;
 
-  const listResponse = await fetch(listUrl, fetchOpts);
+  const listResponse = await shortDramaFetch(listUrl);
 
   if (!listResponse.ok) {
     throw new Error(`HTTP error! status: ${listResponse.status}`);
@@ -74,7 +43,7 @@ async function fetchFromShortDramaSource(
   // Step 2: 获取该分类的短剧列表
   const apiUrl = `${api}?ac=detail&t=${categoryId}&pg=1`;
 
-  const response = await fetch(apiUrl, fetchOpts);
+  const response = await shortDramaFetch(apiUrl);
 
   if (!response.ok) {
     throw new Error(`HTTP error! status: ${response.status}`);

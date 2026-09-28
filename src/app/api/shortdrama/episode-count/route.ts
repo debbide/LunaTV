@@ -3,7 +3,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getCacheTime, getConfig } from '@/lib/config';
-import { DEFAULT_USER_AGENT } from '@/lib/user-agent';
+import { shortDramaFetch } from '@/lib/shortdrama-fetch';
 
 // 标记为动态路由
 export const dynamic = 'force-dynamic';
@@ -44,22 +44,12 @@ export async function GET(request: NextRequest) {
     // 使用备用API搜索短剧获取集数
     const searchUrl = `${alternativeApiUrl}/api/v1/drama/d?dramaName=${encodeURIComponent(name)}`;
 
-    const searchResponse = await fetch(searchUrl, {
-      headers: {
-        'User-Agent': DEFAULT_USER_AGENT,
-        'Accept': 'application/json',
-      },
-    });
+    const searchResponse = await shortDramaFetch(searchUrl);
 
     if (!searchResponse.ok) {
       // 精确搜索失败，尝试模糊搜索
       const fuzzySearchUrl = `${alternativeApiUrl}/api/v1/drama/dl?dramaName=${encodeURIComponent(name)}`;
-      const fuzzyResponse = await fetch(fuzzySearchUrl, {
-        headers: {
-          'User-Agent': DEFAULT_USER_AGENT,
-          'Accept': 'application/json',
-        },
-      });
+      const fuzzyResponse = await shortDramaFetch(fuzzySearchUrl);
 
       if (!fuzzyResponse.ok) {
         return NextResponse.json(

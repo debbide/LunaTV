@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getCacheTime, getConfig } from '@/lib/config';
 import { recordRequest, getDbQueryCount, resetDbQueryCount } from '@/lib/performance-monitor';
-import { DEFAULT_USER_AGENT } from '@/lib/user-agent';
+import { shortDramaFetch } from '@/lib/shortdrama-fetch';
 
 // 强制动态路由，禁用所有缓存
 export const dynamic = 'force-dynamic';
@@ -22,13 +22,7 @@ async function searchFromSource(
   // Step 1: 获取分类列表，找到短剧相关分类的所有ID
   const listUrl = `${api}?ac=list`;
 
-  const listResponse = await fetch(listUrl, {
-    headers: {
-      'User-Agent': DEFAULT_USER_AGENT,
-      'Accept': 'application/json',
-    },
-    signal: AbortSignal.timeout(10000),
-  });
+  const listResponse = await shortDramaFetch(listUrl);
 
   if (!listResponse.ok) {
     throw new Error(`HTTP error! status: ${listResponse.status}`);
@@ -52,13 +46,7 @@ async function searchFromSource(
   // Step 2: 搜索短剧
   const apiUrl = `${api}?ac=detail&wd=${encodeURIComponent(query)}&pg=${page}`;
 
-  const response = await fetch(apiUrl, {
-    headers: {
-      'User-Agent': DEFAULT_USER_AGENT,
-      'Accept': 'application/json',
-    },
-    signal: AbortSignal.timeout(10000),
-  });
+  const response = await shortDramaFetch(apiUrl);
 
   if (!response.ok) {
     throw new Error(`HTTP error! status: ${response.status}`);

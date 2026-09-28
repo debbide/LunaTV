@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { getCacheTime, getConfig } from '@/lib/config';
-import { DEFAULT_USER_AGENT } from '@/lib/user-agent';
+import { shortDramaFetch } from '@/lib/shortdrama-fetch';
 
 // 强制动态路由，禁用所有缓存
 export const dynamic = 'force-dynamic';
@@ -16,13 +16,7 @@ const SHORT_DRAMA_KEYWORDS = ['短剧', '女频恋爱', '反转爽剧', '古装�
 
 // 从单个源获取短剧分类
 async function getCategoriesFromSource(api: string): Promise<{ type_id: number; type_name: string }[]> {
-  const response = await fetch(`${api}?ac=list`, {
-    headers: {
-      'User-Agent': DEFAULT_USER_AGENT,
-      'Accept': 'application/json',
-    },
-    signal: AbortSignal.timeout(10000),
-  });
+  const response = await shortDramaFetch(`${api}?ac=list`);
 
   if (!response.ok) {
     throw new Error(`HTTP error! status: ${response.status}`);

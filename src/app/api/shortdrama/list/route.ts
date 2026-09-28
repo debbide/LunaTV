@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getCacheTime, getConfig } from '@/lib/config';
 import { recordRequest, getDbQueryCount, resetDbQueryCount } from '@/lib/performance-monitor';
-import { DEFAULT_USER_AGENT } from '@/lib/user-agent';
+import { shortDramaFetch } from '@/lib/shortdrama-fetch';
 
 // 强制动态路由，禁用所有缓存
 export const dynamic = 'force-dynamic';
@@ -18,13 +18,7 @@ async function fetchListFromSource(
 ) {
   const apiUrl = `${api}?ac=detail&t=${categoryId}&pg=${page}`;
 
-  const response = await fetch(apiUrl, {
-    headers: {
-      'User-Agent': DEFAULT_USER_AGENT,
-      'Accept': 'application/json',
-    },
-    signal: AbortSignal.timeout(10000),
-  });
+  const response = await shortDramaFetch(apiUrl);
 
   if (!response.ok) {
     throw new Error(`HTTP error! status: ${response.status}`);
