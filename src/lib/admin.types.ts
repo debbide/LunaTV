@@ -191,6 +191,7 @@ export interface AdminConfig {
     primaryApiUrl: string;               // 主API地址
     alternativeApiUrl: string;           // 备用API地址（私密）
     enableAlternative: boolean;          // 是否启用备用API
+    proxyUrl: string;                    // 短剧源代理地址（可选，如 http://127.0.0.1:8002）
   };
   DownloadConfig?: {
     enabled: boolean;                    // 是否启用下载功能（全局开关）

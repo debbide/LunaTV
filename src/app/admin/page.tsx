@@ -67,7 +67,7 @@ import DanmuApiConfig from '@/components/DanmuApiConfig';
 import { TVBoxTokenCell, TVBoxTokenModal } from '@/components/TVBoxTokenManager';
 import YouTubeConfig from '@/components/YouTubeConfig';
 import BilibiliConfig from '@/components/BilibiliConfig';
-// import ShortDramaConfig from '@/components/ShortDramaConfig'; // 暂时隐藏短剧API配置
+import ShortDramaConfig from '@/components/ShortDramaConfig';
 import DownloadConfig from '@/components/OfflineDownloadConfig';
 import EmbyConfig from '@/components/EmbyConfig';
 import CustomAdFilterConfig from '@/components/CustomAdFilterConfig';
@@ -8291,7 +8291,7 @@ function AdminPageClient() {
               <BilibiliConfig config={config} refreshConfig={fetchConfig} />
             </CollapsibleTab>
 
-            {/* 短剧API配置标签 - 暂时隐藏，代码保留以后有用再显示
+            {/* 短剧API配置标签 */}
             <CollapsibleTab
               title='短剧API配置'
               icon={
@@ -8305,7 +8305,6 @@ function AdminPageClient() {
             >
               <ShortDramaConfig config={config} refreshConfig={fetchConfig} />
             </CollapsibleTab>
-            */}
 
             {/* Emby配置标签 */}
             <CollapsibleTab

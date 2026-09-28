@@ -20,6 +20,7 @@ const ShortDramaConfig = ({ config, refreshConfig }: ShortDramaConfigProps) => {
     primaryApiUrl: 'https://tyyszyapi.com/api.php/provide/vod',
     alternativeApiUrl: '',
     enableAlternative: false,
+    proxyUrl: '',
   });
 
   // 从config加载设置
@@ -29,6 +30,7 @@ const ShortDramaConfig = ({ config, refreshConfig }: ShortDramaConfigProps) => {
         primaryApiUrl: config.ShortDramaConfig.primaryApiUrl || 'https://tyyszyapi.com/api.php/provide/vod',
         alternativeApiUrl: config.ShortDramaConfig.alternativeApiUrl || '',
         enableAlternative: config.ShortDramaConfig.enableAlternative ?? false,
+        proxyUrl: (config.ShortDramaConfig as any).proxyUrl || '',
       });
     }
   }, [config]);
@@ -118,6 +120,23 @@ const ShortDramaConfig = ({ config, refreshConfig }: ShortDramaConfigProps) => {
           />
           <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
             主要的短剧视频解析API地址，默认优先使用此API
+          </p>
+        </div>
+
+        {/* 代理地址 */}
+        <div className='mb-6'>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            代理地址（可选）
+          </label>
+          <input
+            type='text'
+            value={shortDramaSettings.proxyUrl}
+            onChange={(e) => setShortDramaSettings(prev => ({ ...prev, proxyUrl: e.target.value }))}
+            className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-blue-500'
+            placeholder='http://127.0.0.1:8002'
+          />
+          <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+            短剧源请求走此代理（如服务器直连源站失败时填写）。留空则直连。
           </p>
         </div>
 

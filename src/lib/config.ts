@@ -528,6 +528,7 @@ export async function configSelfCheck(adminConfig: AdminConfig): Promise<AdminCo
       primaryApiUrl: 'https://tyyszyapi.com/api.php/provide/vod',  // 默认主API
       alternativeApiUrl: '',                            // 默认为空，需要管理员配置
       enableAlternative: false,                         // 默认关闭备用API
+      proxyUrl: '',                                     // 默认不走代理
     };
   }
 

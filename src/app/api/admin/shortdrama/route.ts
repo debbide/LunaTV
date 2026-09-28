@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { primaryApiUrl, alternativeApiUrl, enableAlternative } = body;
+    const { primaryApiUrl, alternativeApiUrl, enableAlternative, proxyUrl } = body;
 
     // 验证必填字段
     if (!primaryApiUrl) {
@@ -51,8 +51,9 @@ export async function POST(request: NextRequest) {
     // 更新短剧配置
     config.ShortDramaConfig = {
       primaryApiUrl: primaryApiUrl.trim(),
-      alternativeApiUrl: alternativeApiUrl.trim(),
+      alternativeApiUrl: alternativeApiUrl ? alternativeApiUrl.trim() : '',
       enableAlternative: !!enableAlternative,
+      proxyUrl: proxyUrl ? proxyUrl.trim() : '',
     };
 
     // 保存到数据库
